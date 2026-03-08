@@ -1,0 +1,63 @@
+---
+page_title: "azurefoundry_vector_store Resource - azurefoundry"
+description: |-
+  Manages an Azure AI Foundry Vector Store.
+---
+
+# azurefoundry_vector_store
+
+Manages an Azure AI Foundry Vector Store. A vector store processes and indexes uploaded files so they can be searched by the `file_search` tool on an agent.
+
+When files are provided via `file_ids`, Terraform will wait for indexing to complete before marking the resource as created.
+
+## Example Usage
+
+```hcl
+resource "azurefoundry_file" "doc" {
+  source = "./document.pdf"
+}
+
+resource "azurefoundry_vector_store" "knowledge" {
+  name     = "knowledge-base"
+  file_ids = [azurefoundry_file.doc.id]
+
+  expiry_anchor = "last_active_at"
+  expiry_days   = 7
+
+  metadata = {
+    environment = "production"
+  }
+}
+
+resource "azurefoundry_agent" "assistant" {
+  model        = "gpt-4o"
+  name         = "knowledge-assistant"
+  instructions = "Answer questions using the knowledge base."
+
+  tools {
+    type = "file_search"
+  }
+
+  file_search_vector_store_ids = [azurefoundry_vector_store.knowledge.id]
+}
+```
+
+## Argument Reference
+
+### Optional
+
+- `name` (String) - Display name for the vector store.
+- `file_ids` (List of String) - File IDs (from `azurefoundry_file`) to index. Maximum 500.
+- `expiry_anchor` (String) - Expiry anchor. Currently only `last_active_at` is supported.
+- `expiry_days` (Number) - Number of days after the anchor before the vector store expires.
+- `metadata` (Map of String) - Up to 16 key/value pairs.
+
+## Attributes Reference
+
+- `id` (String) - The vector store ID assigned by the Foundry service.
+- `created_at` (Number) - Unix timestamp of creation.
+- `status` (String) - Current status: `in_progress`, `completed`, or `expired`.
+- `usage_bytes` (Number) - Storage used in bytes.
+- `files_total` (Number) - Total number of files associated with this vector store.
+- `files_ready` (Number) - Number of files successfully indexed.
+- `files_failed` (Number) - Number of files that failed to index.
