@@ -298,22 +298,22 @@ func (c *FoundryClient) DeleteAgent(ctx context.Context, agentID string) (*Delet
 
 // new CRUD functions, pointing at the newer /agents Microsoft Foundry API
 func (c *FoundryClient) CreateAgentV2(ctx context.Context, req CreateAgentV2Request) (*AgentResponseV2, error) {
-    url := fmt.Sprintf("%s/agents?api-version=2025-11-15-preview", c.ProjectEndpoint)
+    url := fmt.Sprintf("%s/agents?api-version=v1", c.ProjectEndpoint)
     return c.doAgentV2Request(ctx, http.MethodPost, url, req)
 }
 
 func (c *FoundryClient) GetAgentV2(ctx context.Context, name string) (*AgentResponseV2, error) {
-    url := fmt.Sprintf("%s/agents/%s?api-version=2025-11-15-preview", c.ProjectEndpoint, name)
+    url := fmt.Sprintf("%s/agents/%s?api-version=v1", c.ProjectEndpoint, name)
     return c.doAgentV2Request(ctx, http.MethodGet, url, nil)
 }
 
 func (c *FoundryClient) UpdateAgentV2(ctx context.Context, name string, req UpdateAgentV2Request) (*AgentResponseV2, error) {
-    url := fmt.Sprintf("%s/agents/%s?api-version=2025-11-15-preview", c.ProjectEndpoint, name)
+    url := fmt.Sprintf("%s/agents/%s?api-version=v1", c.ProjectEndpoint, name)
     return c.doAgentV2Request(ctx, http.MethodPost, url, req)
 }
 
 func (c *FoundryClient) DeleteAgentV2(ctx context.Context, name string) (*DeleteAgentV2Response, error) {
-    url := fmt.Sprintf("%s/agents/%s?api-version=2025-11-15-preview", c.ProjectEndpoint, name)
+    url := fmt.Sprintf("%s/agents/%s?api-version=v1", c.ProjectEndpoint, name)
     httpReq, err := c.newRequest(ctx, http.MethodDelete, url, nil)
     if err != nil {
         return nil, err
