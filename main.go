@@ -8,7 +8,7 @@ import (
 	"flag"
 	"log"
 
-	"github.com/andrewCluey/terraform-provider-azurefoundry/internal/provider"
+	"github.com/dirien/terraform-provider-azurefoundry/internal/provider"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 )
 
@@ -21,7 +21,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/local/azurefoundry",
+		Address: "registry.terraform.io/dirien/azurefoundry",
 		Debug:   debug,
 	}
 

@@ -1,4 +1,4 @@
-module github.com/andrewCluey/terraform-provider-azurefoundry
+module github.com/dirien/terraform-provider-azurefoundry
 
 go 1.25
 

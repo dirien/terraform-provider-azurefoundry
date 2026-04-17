@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/andrewCluey/terraform-provider-azurefoundry/internal/client"
+	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"

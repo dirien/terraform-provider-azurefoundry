@@ -7,8 +7,8 @@ import (
 	"context"
 	"os"
 
-	"github.com/andrewCluey/terraform-provider-azurefoundry/internal/client"
-	"github.com/andrewCluey/terraform-provider-azurefoundry/internal/resources"
+	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
+	"github.com/dirien/terraform-provider-azurefoundry/internal/resources"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -32,6 +32,7 @@ type AzureFoundryProviderModel struct {
 	TenantID        types.String `tfsdk:"tenant_id"`
 	ClientID        types.String `tfsdk:"client_id"`
 	ClientSecret    types.String `tfsdk:"client_secret"`
+	OIDCToken       types.String `tfsdk:"oidc_token"`
 	APIKey          types.String `tfsdk:"api_key"`
 	UseAzureCLI     types.Bool   `tfsdk:"use_azure_cli"`
 }
@@ -56,28 +57,32 @@ func (p *AzureFoundryProvider) Schema(_ context.Context, _ provider.SchemaReques
 					"Can also be set via `AZURE_AI_FOUNDRY_PROJECT_ENDPOINT`.",
 				Optional: true,
 			},
-			// ── API Key ───────────────────────────────────────────────────────
 			"api_key": schema.StringAttribute{
 				MarkdownDescription: "An API key for the Foundry project. " +
 					"Can also be set via `AZURE_AI_FOUNDRY_API_KEY`.",
 				Optional:  true,
 				Sensitive: true,
 			},
-			// ── Service Principal ─────────────────────────────────────────────
 			"tenant_id": schema.StringAttribute{
-				MarkdownDescription: "Azure AD tenant ID. Can also be set via `AZURE_TENANT_ID`.",
+				MarkdownDescription: "Azure AD tenant ID. Reads `AZURE_TENANT_ID` or `ARM_TENANT_ID`.",
 				Optional:            true,
 			},
 			"client_id": schema.StringAttribute{
-				MarkdownDescription: "Service principal client ID. Can also be set via `AZURE_CLIENT_ID`.",
+				MarkdownDescription: "Service principal client ID. Reads `AZURE_CLIENT_ID` or `ARM_CLIENT_ID`.",
 				Optional:            true,
 			},
 			"client_secret": schema.StringAttribute{
-				MarkdownDescription: "Service principal client secret. Can also be set via `AZURE_CLIENT_SECRET`.",
+				MarkdownDescription: "Service principal client secret. Reads `AZURE_CLIENT_SECRET`.",
 				Optional:            true,
 				Sensitive:           true,
 			},
-			// ── Azure CLI ─────────────────────────────────────────────────────
+			"oidc_token": schema.StringAttribute{
+				MarkdownDescription: "OIDC client assertion / federated token. Used together with " +
+					"`tenant_id` and `client_id` to authenticate via `ClientAssertionCredential`. " +
+					"Reads `AZURE_OIDC_TOKEN` or `ARM_OIDC_TOKEN` (the latter for Pulumi ESC).",
+				Optional:  true,
+				Sensitive: true,
+			},
 			"use_azure_cli": schema.BoolAttribute{
 				MarkdownDescription: "Use credentials from `az login`. Defaults to `false`.",
 				Optional:            true,
@@ -95,7 +100,6 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// Resolve project endpoint.
 	projectEndpoint := os.Getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
 	if !config.ProjectEndpoint.IsNull() && !config.ProjectEndpoint.IsUnknown() {
 		projectEndpoint = config.ProjectEndpoint.ValueString()
@@ -121,11 +125,32 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// ── Auth method 2: Service Principal ─────────────────────────────────────
-	tenantID := firstNonEmpty(attrString(config.TenantID), os.Getenv("AZURE_TENANT_ID"))
-	clientID := firstNonEmpty(attrString(config.ClientID), os.Getenv("AZURE_CLIENT_ID"))
-	clientSecret := firstNonEmpty(attrString(config.ClientSecret), os.Getenv("AZURE_CLIENT_SECRET"))
+	tenantID := firstNonEmpty(attrString(config.TenantID), os.Getenv("AZURE_TENANT_ID"), os.Getenv("ARM_TENANT_ID"))
+	clientID := firstNonEmpty(attrString(config.ClientID), os.Getenv("AZURE_CLIENT_ID"), os.Getenv("ARM_CLIENT_ID"))
 
+	// ── Auth method 2: OIDC / federated token (ClientAssertion) ──────────────
+	// Checked BEFORE secret so callers shipping both an OIDC token and a stale
+	// AZURE_CLIENT_SECRET in env still get OIDC behaviour.
+	oidcToken := firstNonEmpty(attrString(config.OIDCToken), os.Getenv("AZURE_OIDC_TOKEN"), os.Getenv("ARM_OIDC_TOKEN"))
+	if tenantID != "" && clientID != "" && oidcToken != "" {
+		cred, err := azidentity.NewClientAssertionCredential(
+			tenantID, clientID,
+			func(ctx context.Context) (string, error) { return oidcToken, nil },
+			nil,
+		)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to create OIDC client assertion credential", err.Error())
+			return
+		}
+		tflog.Info(ctx, "azurefoundry: authenticating with OIDC client assertion")
+		apiClient := client.NewFoundryClientWithCredential(projectEndpoint, cred)
+		resp.DataSourceData = apiClient
+		resp.ResourceData = apiClient
+		return
+	}
+
+	// ── Auth method 3: Service principal with client secret ──────────────────
+	clientSecret := firstNonEmpty(attrString(config.ClientSecret), os.Getenv("AZURE_CLIENT_SECRET"))
 	if tenantID != "" && clientID != "" && clientSecret != "" {
 		cred, err := azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
 		if err != nil {
@@ -139,7 +164,7 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// ── Auth method 3: Azure CLI ──────────────────────────────────────────────
+	// ── Auth method 4: Azure CLI ──────────────────────────────────────────────
 	useAzureCLI := !config.UseAzureCLI.IsNull() && config.UseAzureCLI.ValueBool()
 	if useAzureCLI {
 		cred, err := azidentity.NewAzureCLICredential(nil)
@@ -154,14 +179,13 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// ── Auth method 4: Default Azure credential chain ─────────────────────────
-	// Covers managed identity, workload identity, environment variables, etc.
+	// ── Auth method 5: Default Azure credential chain ─────────────────────────
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to create Azure credential",
 			"No valid authentication method was found. Set api_key, service principal credentials, "+
-				"or use_azure_cli = true. Error: "+err.Error(),
+				"oidc_token + client_id + tenant_id, or use_azure_cli = true. Error: "+err.Error(),
 		)
 		return
 	}

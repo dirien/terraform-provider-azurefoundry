@@ -122,10 +122,11 @@ type DeleteAgentResponse struct {
 
 // v2 - new API
 type AgentDefinitionV2 struct {
-    Kind         string `json:"kind"`
-    Model        string `json:"model,omitempty"`
-    Instructions string `json:"instructions,omitempty"`
-	Tools        []interface{} `json:"tools,omitempty"`
+    Kind             string                 `json:"kind"`
+    Model            string                 `json:"model,omitempty"`
+    Instructions     string                 `json:"instructions,omitempty"`
+    Tools            []interface{}          `json:"tools,omitempty"`
+    StructuredInputs map[string]interface{} `json:"structured_inputs,omitempty"`
 }
 
 type AgentVersionV2 struct {
@@ -171,6 +172,83 @@ type FileSearchToolV2 struct {
     Type           string   `json:"type"`
     VectorStoreIDs []string `json:"vector_store_ids,omitempty"`
     MaxNumResults  int      `json:"max_num_results,omitempty"`
+}
+
+// CodeInterpreterToolV2 — Foundry expects file_ids nested under container.
+type CodeInterpreterContainer struct {
+    Type    string   `json:"type"`              // "auto"
+    FileIDs []string `json:"file_ids,omitempty"`
+}
+
+type CodeInterpreterToolV2 struct {
+    Type      string                    `json:"type"`            // "code_interpreter"
+    Container *CodeInterpreterContainer `json:"container,omitempty"`
+}
+
+// WebSearchToolV2 — managed Bing-via-Foundry. No connection needed.
+type WebSearchToolV2 struct {
+    Type string `json:"type"` // "web_search"
+}
+
+// BingGroundingToolV2 — Bing Search v7 via a project connection.
+type BingGroundingConfig struct {
+    ConnectionID string `json:"connection_id"`
+}
+
+type BingGroundingToolV2 struct {
+    Type          string              `json:"type"`           // "bing_grounding"
+    BingGrounding BingGroundingConfig `json:"bing_grounding"`
+}
+
+// FunctionToolV2 — OpenAI-style function calling. Parameters is a JSON Schema.
+type FunctionToolV2 struct {
+    Type        string                 `json:"type"` // "function"
+    Name        string                 `json:"name"`
+    Description string                 `json:"description,omitempty"`
+    Parameters  map[string]interface{} `json:"parameters,omitempty"`
+}
+
+// OpenAPIToolV2 — inline OpenAPI spec.
+type OpenAPIAuth struct {
+    Type string `json:"type"` // anonymous | connection
+}
+
+type OpenAPIConfig struct {
+    Name        string                 `json:"name"`
+    Description string                 `json:"description,omitempty"`
+    Spec        map[string]interface{} `json:"spec"`
+    Auth        OpenAPIAuth            `json:"auth"`
+}
+
+type OpenAPIToolV2 struct {
+    Type    string        `json:"type"` // "openapi"
+    OpenAPI OpenAPIConfig `json:"openapi"`
+}
+
+// MCPToolV2 — Model Context Protocol server.
+type MCPToolV2 struct {
+    Type                string `json:"type"` // "mcp"
+    ServerLabel         string `json:"server_label"`
+    ServerURL           string `json:"server_url"`
+    RequireApproval     string `json:"require_approval,omitempty"`
+    ProjectConnectionID string `json:"project_connection_id,omitempty"`
+}
+
+// AzureAISearchToolV2 — Azure AI Search via project connection + index.
+type AzureAISearchIndex struct {
+    ProjectConnectionID string `json:"project_connection_id"`
+    IndexName           string `json:"index_name"`
+    QueryType           string `json:"query_type,omitempty"`
+    TopK                int    `json:"top_k,omitempty"`
+}
+
+type AzureAISearchConfig struct {
+    Indexes []AzureAISearchIndex `json:"indexes"`
+}
+
+type AzureAISearchToolV2 struct {
+    Type           string              `json:"type"` // "azure_ai_search"
+    AzureAISearch  AzureAISearchConfig `json:"azure_ai_search"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

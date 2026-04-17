@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/andrewCluey/terraform-provider-azurefoundry/internal/client"
+	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
