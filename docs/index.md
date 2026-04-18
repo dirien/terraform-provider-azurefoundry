@@ -17,8 +17,9 @@ The azurefoundry provider manages resources in Azure AI Foundry.
 ### Optional
 
 - `api_key` (String, Sensitive) An API key for the Foundry project. Can also be set via `AZURE_AI_FOUNDRY_API_KEY`.
-- `client_id` (String) Service principal client ID. Can also be set via `AZURE_CLIENT_ID`.
-- `client_secret` (String, Sensitive) Service principal client secret. Can also be set via `AZURE_CLIENT_SECRET`.
+- `client_id` (String) Service principal client ID. Reads `AZURE_CLIENT_ID` or `ARM_CLIENT_ID`.
+- `client_secret` (String, Sensitive) Service principal client secret. Reads `AZURE_CLIENT_SECRET`.
+- `oidc_token` (String, Sensitive) OIDC client assertion / federated token. Used together with `tenant_id` and `client_id` to authenticate via `ClientAssertionCredential`. Reads `AZURE_OIDC_TOKEN` or `ARM_OIDC_TOKEN` (the latter for Pulumi ESC).
 - `project_endpoint` (String) The Azure AI Foundry project endpoint. Can also be set via `AZURE_AI_FOUNDRY_PROJECT_ENDPOINT`.
-- `tenant_id` (String) Azure AD tenant ID. Can also be set via `AZURE_TENANT_ID`.
+- `tenant_id` (String) Azure AD tenant ID. Reads `AZURE_TENANT_ID` or `ARM_TENANT_ID`.
 - `use_azure_cli` (Boolean) Use credentials from `az login`. Defaults to `false`.
