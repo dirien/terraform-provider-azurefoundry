@@ -45,6 +45,18 @@ type FoundryAgentV2ResourceModel struct {
 	Instructions         types.String `tfsdk:"instructions"`
 	StructuredInputsJSON types.String `tfsdk:"structured_inputs_json"`
 	Tools                types.List   `tfsdk:"tools"`
+
+	// Hosted-agent fields. Used only when kind is "container_app" or "hosted".
+	Image                     types.String `tfsdk:"image"`
+	Cpu                       types.String `tfsdk:"cpu"`
+	Memory                    types.String `tfsdk:"memory"`
+	ContainerProtocolVersions types.List   `tfsdk:"container_protocol_versions"`
+	EnvironmentVariables      types.Map    `tfsdk:"environment_variables"`
+}
+
+var protocolVersionAttrTypes = map[string]attr.Type{
+	"protocol": types.StringType,
+	"version":  types.StringType,
 }
 
 // toolModelV2 mirrors one element of the `tools` list block. Variant configs
@@ -61,6 +73,7 @@ type toolModelV2 struct {
 	MCP             types.Object `tfsdk:"mcp"`
 	AzureAISearch   types.Object `tfsdk:"azure_ai_search"`
 	BingGrounding   types.Object `tfsdk:"bing_grounding"`
+	MemorySearch    types.Object `tfsdk:"memory_search"`
 }
 
 // ── Tool variant attribute type maps ────────────────────────────────────────
@@ -104,6 +117,12 @@ var bingGroundingAttrTypes = map[string]attr.Type{
 	"connection_id": types.StringType,
 }
 
+var memorySearchAttrTypes = map[string]attr.Type{
+	"memory_store_name": types.StringType,
+	"scope":             types.StringType,
+	"update_delay":      types.Int64Type,
+}
+
 var toolAttrTypesV2 = map[string]attr.Type{
 	"type":             types.StringType,
 	"vector_store_ids": types.ListType{ElemType: types.StringType},
@@ -114,6 +133,7 @@ var toolAttrTypesV2 = map[string]attr.Type{
 	"mcp":              types.ObjectType{AttrTypes: mcpAttrTypes},
 	"azure_ai_search":  types.ObjectType{AttrTypes: azureAISearchAttrTypes},
 	"bing_grounding":   types.ObjectType{AttrTypes: bingGroundingAttrTypes},
+	"memory_search":    types.ObjectType{AttrTypes: memorySearchAttrTypes},
 }
 
 func (r *FoundryAgentV2Resource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -169,6 +189,33 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 					"Use `jsonencode({...})` in HCL or `json.dumps({...})` in a Pulumi program.",
 				Optional: true,
 			},
+			"image": schema.StringAttribute{
+				MarkdownDescription: "Container image URL including tag. Required when `kind` is `container_app` or `hosted`; ignored for `prompt`. Example: `myacr.azurecr.io/fraud-agent:0.1.0`.",
+				Optional:            true,
+			},
+			"cpu": schema.StringAttribute{
+				MarkdownDescription: "vCPU allocation as a string (e.g. `1`, `2`). Required for `container_app`/`hosted` kinds. Allowed pairs: see the Foundry hosted-agent size matrix.",
+				Optional:            true,
+			},
+			"memory": schema.StringAttribute{
+				MarkdownDescription: "Memory allocation in GiB as a string (e.g. `2Gi`, `4Gi`). Required for `container_app`/`hosted` kinds.",
+				Optional:            true,
+			},
+			"container_protocol_versions": schema.ListNestedAttribute{
+				MarkdownDescription: "Protocols the container speaks. Required for `container_app`/`hosted` kinds. Today the valid protocols are `responses` (Azure OpenAI Responses API) and `a2a` (Agent-to-Agent).",
+				Optional:            true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"protocol": schema.StringAttribute{Required: true},
+						"version":  schema.StringAttribute{Required: true},
+					},
+				},
+			},
+			"environment_variables": schema.MapAttribute{
+				MarkdownDescription: "Env vars injected into the hosted agent container. Do not put secrets here — use a connection to a secret store instead.",
+				Optional:            true,
+				ElementType:         types.StringType,
+			},
 		},
 		Blocks: map[string]schema.Block{
 			"tools": schema.ListNestedBlock{
@@ -187,6 +234,7 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 									"openapi",
 									"mcp",
 									"azure_ai_search",
+									"memory_search",
 								),
 							},
 						},
@@ -252,6 +300,15 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 							Optional: true,
 							Attributes: map[string]schema.Attribute{
 								"connection_id": schema.StringAttribute{Required: true},
+							},
+						},
+						"memory_search": schema.SingleNestedAttribute{
+							MarkdownDescription: "Attach a Foundry Memory store (preview). Wire type is `memory_search_preview`; provider accepts the shorter `memory_search` for forward-compat.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"memory_store_name": schema.StringAttribute{Required: true},
+								"scope":             schema.StringAttribute{Optional: true},
+								"update_delay":      schema.Int64Attribute{Optional: true},
 							},
 						},
 					},
@@ -465,7 +522,45 @@ func buildAgentDefinition(ctx context.Context, m FoundryAgentV2ResourceModel) (c
 			def.StructuredInputs = structured
 		}
 	}
+
+	// Hosted-agent / container_app wire-up. Only emit these fields when the
+	// user set them; Foundry rejects the envelope for prompt agents.
+	if !m.Image.IsNull() && !m.Image.IsUnknown() {
+		def.Image = m.Image.ValueString()
+	}
+	if !m.Cpu.IsNull() && !m.Cpu.IsUnknown() {
+		def.Cpu = m.Cpu.ValueString()
+	}
+	if !m.Memory.IsNull() && !m.Memory.IsUnknown() {
+		def.Memory = m.Memory.ValueString()
+	}
+	if !m.ContainerProtocolVersions.IsNull() && !m.ContainerProtocolVersions.IsUnknown() {
+		var pvs []protocolVersionModel
+		diags.Append(m.ContainerProtocolVersions.ElementsAs(ctx, &pvs, false)...)
+		records := make([]client.ProtocolVersionRecord, 0, len(pvs))
+		for _, pv := range pvs {
+			records = append(records, client.ProtocolVersionRecord{
+				Protocol: pv.Protocol.ValueString(),
+				Version:  pv.Version.ValueString(),
+			})
+		}
+		def.ContainerProtocolVersions = records
+	}
+	if !m.EnvironmentVariables.IsNull() && !m.EnvironmentVariables.IsUnknown() {
+		raw := make(map[string]types.String, len(m.EnvironmentVariables.Elements()))
+		diags.Append(m.EnvironmentVariables.ElementsAs(ctx, &raw, false)...)
+		env := make(map[string]string, len(raw))
+		for k, v := range raw {
+			env[k] = v.ValueString()
+		}
+		def.EnvironmentVariables = env
+	}
 	return def, diags
+}
+
+type protocolVersionModel struct {
+	Protocol types.String `tfsdk:"protocol"`
+	Version  types.String `tfsdk:"version"`
 }
 
 func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryAgentV2ResourceModel) diag.Diagnostics {
@@ -495,6 +590,52 @@ func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryA
 		if buf, err := json.Marshal(r.Versions.Latest.Definition.StructuredInputs); err == nil {
 			m.StructuredInputsJSON = types.StringValue(string(buf))
 		}
+	}
+
+	// Hosted-agent fields. Leave null for prompt/workflow kinds so state diffs
+	// stay clean for users who never set them.
+	def := r.Versions.Latest.Definition
+	if def.Image != "" {
+		m.Image = types.StringValue(def.Image)
+	} else {
+		m.Image = types.StringNull()
+	}
+	if def.Cpu != "" {
+		m.Cpu = types.StringValue(def.Cpu)
+	} else {
+		m.Cpu = types.StringNull()
+	}
+	if def.Memory != "" {
+		m.Memory = types.StringValue(def.Memory)
+	} else {
+		m.Memory = types.StringNull()
+	}
+	if len(def.ContainerProtocolVersions) > 0 {
+		objs := make([]attr.Value, 0, len(def.ContainerProtocolVersions))
+		for _, pv := range def.ContainerProtocolVersions {
+			obj, d := types.ObjectValue(protocolVersionAttrTypes, map[string]attr.Value{
+				"protocol": types.StringValue(pv.Protocol),
+				"version":  types.StringValue(pv.Version),
+			})
+			diags.Append(d...)
+			objs = append(objs, obj)
+		}
+		list, d := types.ListValue(types.ObjectType{AttrTypes: protocolVersionAttrTypes}, objs)
+		diags.Append(d...)
+		m.ContainerProtocolVersions = list
+	} else {
+		m.ContainerProtocolVersions = types.ListNull(types.ObjectType{AttrTypes: protocolVersionAttrTypes})
+	}
+	if len(def.EnvironmentVariables) > 0 {
+		envAttrs := make(map[string]attr.Value, len(def.EnvironmentVariables))
+		for k, v := range def.EnvironmentVariables {
+			envAttrs[k] = types.StringValue(v)
+		}
+		envMap, d := types.MapValue(types.StringType, envAttrs)
+		diags.Append(d...)
+		m.EnvironmentVariables = envMap
+	} else {
+		m.EnvironmentVariables = types.MapNull(types.StringType)
 	}
 
 	toolObjects := make([]attr.Value, 0, len(r.Versions.Latest.Definition.Tools))
@@ -659,6 +800,21 @@ func extractV2Tools(ctx context.Context, toolsList types.List) ([]interface{}, d
 				}
 			}
 			result = append(result, tool)
+		case "memory_search":
+			tool := client.MemorySearchToolV2{Type: "memory_search_preview"}
+			if !t.MemorySearch.IsNull() && !t.MemorySearch.IsUnknown() {
+				attrs := t.MemorySearch.Attributes()
+				if v, ok := attrs["memory_store_name"].(types.String); ok {
+					tool.MemoryStoreName = v.ValueString()
+				}
+				if v, ok := attrs["scope"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
+					tool.Scope = v.ValueString()
+				}
+				if v, ok := attrs["update_delay"].(types.Int64); ok && !v.IsNull() && !v.IsUnknown() {
+					tool.UpdateDelay = int(v.ValueInt64())
+				}
+			}
+			result = append(result, tool)
 		default:
 			diags.AddError("Unsupported tool type", fmt.Sprintf("tool type %q is not supported", tt))
 		}
@@ -682,6 +838,14 @@ func wireToolToObject(toolMap map[string]interface{}) (types.Object, diag.Diagno
 		"mcp":              types.ObjectNull(mcpAttrTypes),
 		"azure_ai_search":  types.ObjectNull(azureAISearchAttrTypes),
 		"bing_grounding":   types.ObjectNull(bingGroundingAttrTypes),
+		"memory_search":    types.ObjectNull(memorySearchAttrTypes),
+	}
+
+	// Foundry emits the memory-search tool with type="memory_search_preview"
+	// during preview; fold it back onto the stable "memory_search" schema key.
+	if tt == "memory_search_preview" {
+		tt = "memory_search"
+		values["type"] = types.StringValue("memory_search")
 	}
 
 	switch tt {
@@ -806,6 +970,20 @@ func wireToolToObject(toolMap map[string]interface{}) (types.Object, diag.Diagno
 		obj, d := types.ObjectValue(azureAISearchAttrTypes, map[string]attr.Value{"indexes": idxList})
 		diags.Append(d...)
 		values["azure_ai_search"] = obj
+	case "memory_search":
+		storeName, _ := toolMap["memory_store_name"].(string)
+		scope, _ := toolMap["scope"].(string)
+		delay := int64(0)
+		if d, ok := toolMap["update_delay"].(float64); ok {
+			delay = int64(d)
+		}
+		obj, d := types.ObjectValue(memorySearchAttrTypes, map[string]attr.Value{
+			"memory_store_name": types.StringValue(storeName),
+			"scope":             types.StringValue(scope),
+			"update_delay":      types.Int64Value(delay),
+		})
+		diags.Append(d...)
+		values["memory_search"] = obj
 	}
 
 	obj, d := types.ObjectValue(toolAttrTypesV2, values)

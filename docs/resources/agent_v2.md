@@ -29,6 +29,14 @@ Manages an Azure AI Foundry Agent (v2 API).
 - `structured_inputs_json` (String) JSON string describing the agent's `structured_inputs` schema. Use `jsonencode({...})` in HCL or `json.dumps({...})` in a Pulumi program.
 - `tools` (Block List) Tools enabled for the agent. (see [below for nested schema](#nestedblock--tools))
 
+### Optional — hosted-agent (`kind = "container_app"` / `"hosted"`) fields
+
+- `image` (String) Container image URL including tag. Required when `kind` is `container_app` or `hosted`; ignored for `prompt`. Example: `myacr.azurecr.io/fraud-agent:0.1.0`.
+- `cpu` (String) vCPU allocation as a string (e.g. `1`, `2`). Required for `container_app`/`hosted` kinds.
+- `memory` (String) Memory allocation in GiB as a string (e.g. `2Gi`, `4Gi`). Required for `container_app`/`hosted` kinds.
+- `container_protocol_versions` (Attributes List) Protocols the container speaks (`responses` v1 or `a2a` v1). Required for `container_app`/`hosted` kinds. Each element has `protocol` (String) and `version` (String).
+- `environment_variables` (Map of String) Env vars injected into the hosted agent container. Do **not** put secrets here — use a project connection to a secret store.
+
 ### Read-Only
 
 - `created_at` (Number)
@@ -40,7 +48,7 @@ Manages an Azure AI Foundry Agent (v2 API).
 
 Required:
 
-- `type` (String)
+- `type` (String) — one of `file_search`, `code_interpreter`, `web_search`, `bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`.
 
 Optional:
 
@@ -50,6 +58,10 @@ Optional:
 - `function` (Attributes) (see [below for nested schema](#nestedatt--tools--function))
 - `max_num_results` (Number)
 - `mcp` (Attributes) (see [below for nested schema](#nestedatt--tools--mcp))
+- `memory_search` (Attributes) — attaches a Foundry Memory store (preview). Wire type is `memory_search_preview`; provider accepts the shorter `memory_search` for forward-compat. Fields:
+  - `memory_store_name` (String, required)
+  - `scope` (String, optional) — use `"{{$userId}}"` to resolve from the `x-memory-user-id` header or caller's Entra identity.
+  - `update_delay` (Number, optional) — seconds of inactivity before writing extracted memories. Defaults to 300.
 - `openapi` (Attributes) (see [below for nested schema](#nestedatt--tools--openapi))
 - `vector_store_ids` (List of String)
 
