@@ -52,6 +52,16 @@ type FoundryAgentV2ResourceModel struct {
 	Memory                    types.String `tfsdk:"memory"`
 	ContainerProtocolVersions types.List   `tfsdk:"container_protocol_versions"`
 	EnvironmentVariables      types.Map    `tfsdk:"environment_variables"`
+
+	// Computed: Foundry-managed Entra identity Foundry creates for each
+	// hosted-agent version. Grant `Azure AI User` to this identity for the
+	// container to authenticate to the model at runtime.
+	InstanceIdentity types.Object `tfsdk:"instance_identity"`
+}
+
+var instanceIdentityAttrTypes = map[string]attr.Type{
+	"client_id":    types.StringType,
+	"principal_id": types.StringType,
 }
 
 var protocolVersionAttrTypes = map[string]attr.Type{
@@ -200,6 +210,14 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 			"memory": schema.StringAttribute{
 				MarkdownDescription: "Memory allocation in GiB as a string (e.g. `2Gi`, `4Gi`). Required for `container_app`/`hosted` kinds.",
 				Optional:            true,
+			},
+			"instance_identity": schema.SingleNestedAttribute{
+				MarkdownDescription: "Foundry-managed Entra identity for a hosted-agent version. Computed. Use `client_id` / `principal_id` to grant runtime RBAC (e.g. `Azure AI User` on the Foundry account).",
+				Computed:            true,
+				Attributes: map[string]schema.Attribute{
+					"client_id":    schema.StringAttribute{Computed: true},
+					"principal_id": schema.StringAttribute{Computed: true},
+				},
 			},
 			"container_protocol_versions": schema.ListNestedAttribute{
 				MarkdownDescription: "Protocols the container speaks. Required for `container_app`/`hosted` kinds. Today the valid protocols are `responses` (Azure OpenAI Responses API) and `a2a` (Agent-to-Agent).",
@@ -636,6 +654,17 @@ func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryA
 		m.EnvironmentVariables = envMap
 	} else {
 		m.EnvironmentVariables = types.MapNull(types.StringType)
+	}
+
+	if id := r.Versions.Latest.InstanceIdentity; id != nil {
+		idObj, d := types.ObjectValue(instanceIdentityAttrTypes, map[string]attr.Value{
+			"client_id":    types.StringValue(id.ClientID),
+			"principal_id": types.StringValue(id.PrincipalID),
+		})
+		diags.Append(d...)
+		m.InstanceIdentity = idObj
+	} else {
+		m.InstanceIdentity = types.ObjectNull(instanceIdentityAttrTypes)
 	}
 
 	toolObjects := make([]attr.Value, 0, len(r.Versions.Latest.Definition.Tools))

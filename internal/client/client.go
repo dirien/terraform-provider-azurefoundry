@@ -149,15 +149,25 @@ type ProtocolVersionRecord struct {
     Version  string `json:"version"`
 }
 
+// AgentInstanceIdentity is the Foundry-managed Entra identity attached to a
+// hosted agent version. Foundry assigns one per version at create time and
+// the platform uses it for runtime model + tool access. Exposed as an output
+// so Pulumi/Terraform programs can grant RBAC (e.g. Azure AI User) to it.
+type AgentInstanceIdentity struct {
+    ClientID    string `json:"client_id"`
+    PrincipalID string `json:"principal_id"`
+}
+
 type AgentVersionV2 struct {
-    Object      string            `json:"object"`
-    ID          string            `json:"id"`
-    Name        string            `json:"name"`
-    Version     string            `json:"version"`
-    Description string            `json:"description"`
-    CreatedAt   int64             `json:"created_at"`
-    Metadata    map[string]string `json:"metadata"`
-    Definition  AgentDefinitionV2 `json:"definition"`
+    Object           string                 `json:"object"`
+    ID               string                 `json:"id"`
+    Name             string                 `json:"name"`
+    Version          string                 `json:"version"`
+    Description      string                 `json:"description"`
+    CreatedAt        int64                  `json:"created_at"`
+    Metadata         map[string]string      `json:"metadata"`
+    Definition       AgentDefinitionV2      `json:"definition"`
+    InstanceIdentity *AgentInstanceIdentity `json:"instance_identity,omitempty"`
 }
 
 type AgentResponseV2 struct {
