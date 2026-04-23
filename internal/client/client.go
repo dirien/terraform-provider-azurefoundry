@@ -903,6 +903,11 @@ func (c *FoundryClient) newRequestRaw(ctx context.Context, method, url string, b
 
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
+	// Foundry preview opt-in. Harmless on non-preview endpoints; required
+	// for hosted-agent CRUD (HTTP 403 preview_feature_required without it)
+	// and for memory-store CRUD (HTTP 404 "Project not found" — the API
+	// lies about which feature is missing). Comma-separated list.
+	req.Header.Set("Foundry-Features", "HostedAgents=V1Preview, MemoryStores=V1Preview")
 	return req, nil
 }
 
