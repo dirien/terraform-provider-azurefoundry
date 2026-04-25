@@ -76,7 +76,7 @@ func NewFoundryClientWithAPIKey(projectEndpoint, apiKey string) *FoundryClient {
 }
 
 // WaitForProjectReady polls the Foundry data-plane endpoint until a cheap
-// GET on /agents returns 2xx. This covers two intertwined startup races:
+// GET on /files returns 2xx. This covers two intertwined startup races:
 //
 //  1. ARM finishes creating the project resource before the data-plane
 //     project routing is ready (Foundry returns HTTP 404
@@ -84,6 +84,14 @@ func NewFoundryClientWithAPIKey(projectEndpoint, apiKey string) *FoundryClient {
 //  2. RBAC role assignments take 10–30 minutes to propagate to Foundry's
 //     access-check cache. While they propagate, the data plane returns
 //     401/403 even though the principal does have the role server-side.
+//
+// /files on the v1 surface (api-version=APIVersion) is intentional: it's
+// universally available on every Foundry project regardless of whether the
+// underlying account has an Agents capability host. Probing /agents on the
+// v2 surface returns a permanent 404 ("Project not found") for prompt-only
+// projects without an AccountCapabilityHost of kind Agents — which would
+// hang Create on those projects until the timeout fires even though the
+// data plane is fully up.
 //
 // First-Create-per-session pays the wait; subsequent Creates short-circuit
 // via the cached projectReady flag.
@@ -103,7 +111,7 @@ func (c *FoundryClient) WaitForProjectReady(ctx context.Context, timeout time.Du
 		return nil
 	}
 
-	url := c.ProjectEndpoint + "/agents?api-version=v1"
+	url := c.ProjectEndpoint + "/files?api-version=" + APIVersion
 	deadline := time.Now().Add(timeout)
 	backoff := 5 * time.Second
 
