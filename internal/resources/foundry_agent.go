@@ -535,3 +535,36 @@ func isNotFound(err error) bool {
 	apiErr, ok := err.(*client.APIError)
 	return ok && apiErr.StatusCode == 404
 }
+
+// isConflict reports whether err is an HTTP 409 from the Foundry API.
+// 409 is what the data plane returns when a resource keyed by a
+// user-supplied name (agent, memory store) already exists. Usually that
+// means an orphan from a prior create that didn't make it into Pulumi /
+// Terraform state — provider crash, signal interrupt, or a state-write
+// hiccup leaving the data-plane resource live but unmanaged.
+func isConflict(err error) bool {
+	apiErr, ok := err.(*client.APIError)
+	return ok && apiErr.StatusCode == 409
+}
+
+// alreadyExistsError formats a recovery message for the orphan case.
+// Resource is the human label (e.g. "agent", "memory store"), name is the
+// user-supplied identifier, and tfType / pulumiType are the import-time
+// resource references for each frontend.
+func alreadyExistsError(resourceLabel, name, tfType, pulumiType string) (string, string) {
+	summary := fmt.Sprintf("Foundry %s %q already exists", resourceLabel, name)
+	detail := fmt.Sprintf(
+		"A %s named %q exists in the Foundry project but is not tracked in "+
+			"this Terraform/Pulumi state. This usually means a prior create "+
+			"succeeded server-side but the result was not recorded in state "+
+			"(provider crash, signal interrupt, or network blip during state "+
+			"write).\n\n"+
+			"Recover with one of:\n\n"+
+			"  Terraform:  terraform import %s.<address> %s\n"+
+			"  Pulumi:     pulumi import %s <pulumi-name> %s\n\n"+
+			"Then re-run apply/up to reconcile drift. To force a clean "+
+			"recreation, delete the existing %s in the Foundry project first.",
+		resourceLabel, name, tfType, name, pulumiType, name, resourceLabel,
+	)
+	return summary, detail
+}

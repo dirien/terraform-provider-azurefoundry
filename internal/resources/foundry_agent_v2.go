@@ -368,6 +368,14 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 
 	agentResp, err := r.client.CreateAgentV2(ctx, apiReq)
 	if err != nil {
+		if isConflict(err) {
+			summary, detail := alreadyExistsError(
+				"agent", apiReq.Name,
+				"azurefoundry_agent_v2", "azurefoundry:index:AgentV2",
+			)
+			resp.Diagnostics.AddError(summary, detail)
+			return
+		}
 		resp.Diagnostics.AddError("Error creating Foundry agent", err.Error())
 		return
 	}

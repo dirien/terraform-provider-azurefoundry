@@ -23,6 +23,7 @@ import (
 )
 
 var _ resource.Resource = &FoundryMemoryStoreV2Resource{}
+var _ resource.ResourceWithImportState = &FoundryMemoryStoreV2Resource{}
 
 func NewFoundryMemoryStoreV2Resource() resource.Resource {
 	return &FoundryMemoryStoreV2Resource{}
@@ -164,6 +165,14 @@ func (r *FoundryMemoryStoreV2Resource) Create(ctx context.Context, req resource.
 
 	msResp, err := r.client.CreateMemoryStore(ctx, apiReq)
 	if err != nil {
+		if isConflict(err) {
+			summary, detail := alreadyExistsError(
+				"memory store", apiReq.Name,
+				"azurefoundry_memory_store_v2", "azurefoundry:index:MemoryStoreV2",
+			)
+			resp.Diagnostics.AddError(summary, detail)
+			return
+		}
 		resp.Diagnostics.AddError("Error creating memory store", err.Error())
 		return
 	}
@@ -259,6 +268,22 @@ func (r *FoundryMemoryStoreV2Resource) Delete(ctx context.Context, req resource.
 		resp.Diagnostics.AddError("Error deleting memory store", err.Error())
 		return
 	}
+}
+
+func (r *FoundryMemoryStoreV2Resource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	msResp, err := r.client.GetMemoryStore(ctx, req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Error importing memory store", err.Error())
+		return
+	}
+
+	var state FoundryMemoryStoreV2ResourceModel
+	resp.Diagnostics.Append(memoryStoreResponseToModel(msResp, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
