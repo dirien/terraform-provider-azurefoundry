@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package main

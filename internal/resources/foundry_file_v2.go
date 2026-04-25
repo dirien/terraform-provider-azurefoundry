@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package resources
@@ -149,7 +149,7 @@ func (r *FoundryFileV2Resource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
-	tflog.Debug(ctx, "Uploading file to Foundry", map[string]interface{}{"source": source})
+	tflog.Debug(ctx, "Uploading file to Foundry", map[string]any{"source": source})
 
 	fileResp, err := r.client.UploadFile(ctx, source, fileData, purpose)
 	if err != nil {
@@ -163,7 +163,7 @@ func (r *FoundryFileV2Resource) Create(ctx context.Context, req resource.CreateR
 	plan.Filename = types.StringValue(fileResp.Filename)
 	plan.Purpose = types.StringValue(string(fileResp.Purpose))
 
-	tflog.Debug(ctx, "Uploaded file", map[string]interface{}{"id": fileResp.ID})
+	tflog.Debug(ctx, "Uploaded file", map[string]any{"id": fileResp.ID})
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -210,7 +210,7 @@ func (r *FoundryFileV2Resource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting Foundry file", map[string]interface{}{"id": state.ID.ValueString()})
+	tflog.Debug(ctx, "Deleting Foundry file", map[string]any{"id": state.ID.ValueString()})
 
 	_, err := r.client.DeleteFile(ctx, state.ID.ValueString())
 	if err != nil {

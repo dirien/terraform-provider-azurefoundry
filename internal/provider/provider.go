@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package provider
@@ -10,6 +10,7 @@ import (
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 	"github.com/dirien/terraform-provider-azurefoundry/internal/resources"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/function"
@@ -20,8 +21,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
-var _ provider.Provider = &AzureFoundryProvider{}
-var _ provider.ProviderWithFunctions = &AzureFoundryProvider{}
+var (
+	_ provider.Provider              = &AzureFoundryProvider{}
+	_ provider.ProviderWithFunctions = &AzureFoundryProvider{}
+)
 
 type AzureFoundryProvider struct {
 	version string
@@ -100,10 +103,7 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	projectEndpoint := os.Getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
-	if !config.ProjectEndpoint.IsNull() && !config.ProjectEndpoint.IsUnknown() {
-		projectEndpoint = config.ProjectEndpoint.ValueString()
-	}
+	projectEndpoint := firstNonEmpty(attrString(config.ProjectEndpoint), os.Getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT"))
 	if projectEndpoint == "" {
 		resp.Diagnostics.AddError(
 			"Missing project_endpoint",
@@ -112,87 +112,71 @@ func (p *AzureFoundryProvider) Configure(ctx context.Context, req provider.Confi
 		return
 	}
 
-	// ── Auth method 1: API Key ────────────────────────────────────────────────
-	apiKey := os.Getenv("AZURE_AI_FOUNDRY_API_KEY")
-	if !config.APIKey.IsNull() && !config.APIKey.IsUnknown() {
-		apiKey = config.APIKey.ValueString()
-	}
-	if apiKey != "" {
-		tflog.Info(ctx, "azurefoundry: authenticating with API key")
-		apiClient := client.NewFoundryClientWithAPIKey(projectEndpoint, apiKey)
-		resp.DataSourceData = apiClient
-		resp.ResourceData = apiClient
+	auth := resolveAuth(config)
+	if auth.err != nil {
+		resp.Diagnostics.AddError("Failed to create "+auth.label+" credential", auth.err.Error())
 		return
 	}
 
-	tenantID := firstNonEmpty(attrString(config.TenantID), os.Getenv("AZURE_TENANT_ID"), os.Getenv("ARM_TENANT_ID"))
-	clientID := firstNonEmpty(attrString(config.ClientID), os.Getenv("AZURE_CLIENT_ID"), os.Getenv("ARM_CLIENT_ID"))
-
-	// ── Auth method 2: OIDC / federated token (ClientAssertion) ──────────────
-	// Checked BEFORE secret so callers shipping both an OIDC token and a stale
-	// AZURE_CLIENT_SECRET in env still get OIDC behaviour.
-	oidcToken := firstNonEmpty(attrString(config.OIDCToken), os.Getenv("AZURE_OIDC_TOKEN"), os.Getenv("ARM_OIDC_TOKEN"))
-	if tenantID != "" && clientID != "" && oidcToken != "" {
-		cred, err := azidentity.NewClientAssertionCredential(
-			tenantID, clientID,
-			func(ctx context.Context) (string, error) { return oidcToken, nil },
-			nil,
-		)
-		if err != nil {
-			resp.Diagnostics.AddError("Failed to create OIDC client assertion credential", err.Error())
-			return
-		}
-		tflog.Info(ctx, "azurefoundry: authenticating with OIDC client assertion")
-		apiClient := client.NewFoundryClientWithCredential(projectEndpoint, cred)
-		resp.DataSourceData = apiClient
-		resp.ResourceData = apiClient
-		return
+	var apiClient *client.FoundryClient
+	if auth.apiKey != "" {
+		apiClient = client.NewFoundryClientWithAPIKey(projectEndpoint, auth.apiKey)
+	} else {
+		apiClient = client.NewFoundryClientWithCredential(projectEndpoint, auth.cred)
 	}
+	tflog.Info(ctx, "azurefoundry: authenticating with "+auth.label)
 
-	// ── Auth method 3: Service principal with client secret ──────────────────
-	clientSecret := firstNonEmpty(attrString(config.ClientSecret), os.Getenv("AZURE_CLIENT_SECRET"))
-	if tenantID != "" && clientID != "" && clientSecret != "" {
-		cred, err := azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
-		if err != nil {
-			resp.Diagnostics.AddError("Failed to create service principal credential", err.Error())
-			return
-		}
-		tflog.Info(ctx, "azurefoundry: authenticating with service principal")
-		apiClient := client.NewFoundryClientWithCredential(projectEndpoint, cred)
-		resp.DataSourceData = apiClient
-		resp.ResourceData = apiClient
-		return
-	}
-
-	// ── Auth method 4: Azure CLI ──────────────────────────────────────────────
-	useAzureCLI := !config.UseAzureCLI.IsNull() && config.UseAzureCLI.ValueBool()
-	if useAzureCLI {
-		cred, err := azidentity.NewAzureCLICredential(nil)
-		if err != nil {
-			resp.Diagnostics.AddError("Failed to create Azure CLI credential", err.Error())
-			return
-		}
-		tflog.Info(ctx, "azurefoundry: authenticating with Azure CLI")
-		apiClient := client.NewFoundryClientWithCredential(projectEndpoint, cred)
-		resp.DataSourceData = apiClient
-		resp.ResourceData = apiClient
-		return
-	}
-
-	// ── Auth method 5: Default Azure credential chain ─────────────────────────
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to create Azure credential",
-			"No valid authentication method was found. Set api_key, service principal credentials, "+
-				"oidc_token + client_id + tenant_id, or use_azure_cli = true. Error: "+err.Error(),
-		)
-		return
-	}
-	tflog.Info(ctx, "azurefoundry: authenticating with default Azure credential chain")
-	apiClient := client.NewFoundryClientWithCredential(projectEndpoint, cred)
 	resp.DataSourceData = apiClient
 	resp.ResourceData = apiClient
+}
+
+// authResult carries the chosen auth method's output. Exactly one of apiKey or
+// cred is set on success; err is set if credential construction failed.
+type authResult struct {
+	apiKey string
+	cred   azcore.TokenCredential
+	label  string
+	err    error
+}
+
+// resolveAuth picks the first auth method whose inputs are present, in the
+// fallback order documented in the README:
+//  1. API key (config attr or AZURE_AI_FOUNDRY_API_KEY)
+//  2. OIDC client assertion (tenant+client+oidc_token; checked before secret
+//     so callers shipping both a fresh OIDC token and a stale CLIENT_SECRET in
+//     env still get OIDC behavior)
+//  3. Service principal with client secret
+//  4. Azure CLI (use_azure_cli = true)
+//  5. Default Azure credential chain (managed identity, workload identity, ...)
+func resolveAuth(cfg AzureFoundryProviderModel) authResult {
+	if k := firstNonEmpty(attrString(cfg.APIKey), os.Getenv("AZURE_AI_FOUNDRY_API_KEY")); k != "" {
+		return authResult{apiKey: k, label: "API key"}
+	}
+
+	tenantID := firstNonEmpty(attrString(cfg.TenantID), os.Getenv("AZURE_TENANT_ID"), os.Getenv("ARM_TENANT_ID"))
+	clientID := firstNonEmpty(attrString(cfg.ClientID), os.Getenv("AZURE_CLIENT_ID"), os.Getenv("ARM_CLIENT_ID"))
+
+	if oidc := firstNonEmpty(attrString(cfg.OIDCToken), os.Getenv("AZURE_OIDC_TOKEN"), os.Getenv("ARM_OIDC_TOKEN")); tenantID != "" && clientID != "" && oidc != "" {
+		cred, err := azidentity.NewClientAssertionCredential(
+			tenantID, clientID,
+			func(context.Context) (string, error) { return oidc, nil },
+			nil,
+		)
+		return authResult{cred: cred, err: err, label: "OIDC client assertion"}
+	}
+
+	if secret := firstNonEmpty(attrString(cfg.ClientSecret), os.Getenv("AZURE_CLIENT_SECRET")); tenantID != "" && clientID != "" && secret != "" {
+		cred, err := azidentity.NewClientSecretCredential(tenantID, clientID, secret, nil)
+		return authResult{cred: cred, err: err, label: "service principal"}
+	}
+
+	if !cfg.UseAzureCLI.IsNull() && cfg.UseAzureCLI.ValueBool() {
+		cred, err := azidentity.NewAzureCLICredential(nil)
+		return authResult{cred: cred, err: err, label: "Azure CLI"}
+	}
+
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	return authResult{cred: cred, err: err, label: "default Azure credential chain"}
 }
 
 func (p *AzureFoundryProvider) Resources(_ context.Context) []func() resource.Resource {

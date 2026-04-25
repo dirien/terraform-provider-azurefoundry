@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package resources
@@ -23,8 +23,18 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
-var _ resource.Resource = &FoundryAgentV2Resource{}
-var _ resource.ResourceWithImportState = &FoundryAgentV2Resource{}
+var (
+	_ resource.Resource                = &FoundryAgentV2Resource{}
+	_ resource.ResourceWithImportState = &FoundryAgentV2Resource{}
+)
+
+// User-facing tool-type identifiers. The wire spelling for memory search is
+// "memory_search_preview" while the feature is in preview; we keep the
+// stable user-facing spelling "memory_search" and translate at the boundary.
+const (
+	toolTypeMemorySearch        = "memory_search"
+	toolTypeMemorySearchPreview = "memory_search_preview"
+)
 
 func NewFoundryAgentV2Resource() resource.Resource {
 	return &FoundryAgentV2Resource{}
@@ -49,7 +59,7 @@ type FoundryAgentV2ResourceModel struct {
 
 	// Hosted-agent fields. Used only when kind is "container_app" or "hosted".
 	Image                     types.String `tfsdk:"image"`
-	Cpu                       types.String `tfsdk:"cpu"`
+	CPU                       types.String `tfsdk:"cpu"`
 	Memory                    types.String `tfsdk:"memory"`
 	ContainerProtocolVersions types.List   `tfsdk:"container_protocol_versions"`
 	EnvironmentVariables      types.Map    `tfsdk:"environment_variables"`
@@ -379,7 +389,7 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	tflog.Debug(ctx, "Creating Foundry agent", map[string]interface{}{"name": apiReq.Name, "model": apiReq.Definition.Model})
+	tflog.Debug(ctx, "Creating Foundry agent", map[string]any{"name": apiReq.Name, "model": apiReq.Definition.Model})
 
 	// Block until the project's data plane is reachable (project routing +
 	// RBAC propagation). First Create per session pays the cost; the rest
@@ -389,25 +399,8 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	// Pre-flight GET: shrink the orphan-creation race. If a resource with
-	// this name already exists in the data plane, fail with the import
-	// hint *before* we POST. Without this, a Create that's about to 409
-	// would still return that 409 — but the orphan was created by an
-	// earlier run, not by us. With this, we can also catch the case where
-	// state was lost (e.g. backend wipe) and the data-plane resource is
-	// still here. The remaining race window — between this GET and the
-	// POST below — is on the order of one HTTP roundtrip, and a true
-	// concurrent create from another caller would still surface the same
-	// import-hint error (caught below by isConflict).
-	if existing, getErr := r.client.GetAgentV2(ctx, apiReq.Name); getErr == nil && existing != nil {
-		summary, detail := alreadyExistsError(
-			"agent", apiReq.Name,
-			"azurefoundry_agent_v2", "azurefoundry:index:AgentV2",
-		)
-		resp.Diagnostics.AddError(summary, detail)
-		return
-	} else if getErr != nil && !isNotFound(getErr) {
-		resp.Diagnostics.AddError("Pre-flight existence check failed", getErr.Error())
+	resp.Diagnostics.Append(r.preflightAgentMustNotExist(ctx, apiReq.Name)...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
@@ -430,32 +423,79 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
-	// Warmup is opt-in and only meaningful for hosted agents — prompt
-	// agents are reachable as soon as Create returns (no per-session
-	// sandbox to cold-start).
-	wantWarmup := !plan.Warmup.IsNull() && !plan.Warmup.IsUnknown() && plan.Warmup.ValueBool()
-	isHosted := plan.Kind.ValueString() == "hosted" || plan.Kind.ValueString() == "container_app"
-	if wantWarmup && isHosted {
-		timeout := 5 * time.Minute
-		if !plan.WarmupTimeout.IsNull() && !plan.WarmupTimeout.IsUnknown() {
-			if d, derr := time.ParseDuration(plan.WarmupTimeout.ValueString()); derr == nil && d > 0 {
-				timeout = d
-			} else if derr != nil {
-				resp.Diagnostics.AddError(
-					"Invalid warmup_timeout",
-					fmt.Sprintf("warmup_timeout %q is not a valid Go duration: %s", plan.WarmupTimeout.ValueString(), derr.Error()),
-				)
-				return
-			}
-		}
-		tflog.Debug(ctx, "Warming up Foundry agent", map[string]interface{}{"name": apiReq.Name, "timeout": timeout.String()})
-		if err := r.client.WaitForAgentV2Ready(ctx, apiReq.Name, timeout, 5*time.Second); err != nil {
-			resp.Diagnostics.AddError("Agent warmup failed", err.Error())
-			return
-		}
+	resp.Diagnostics.Append(r.warmupIfRequested(ctx, plan, apiReq.Name)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// preflightAgentMustNotExist shrinks the orphan-creation race. If an agent
+// with this name already exists in the data plane, fail with the import hint
+// before we POST — that converts an inscrutable 409 from an earlier run's
+// orphan into an actionable error here. The remaining race window between
+// this GET and the POST is one HTTP roundtrip; a true concurrent create from
+// another caller still surfaces the same import-hint error via isConflict.
+func (r *FoundryAgentV2Resource) preflightAgentMustNotExist(ctx context.Context, name string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	existing, err := r.client.GetAgentV2(ctx, name)
+	switch {
+	case err == nil && existing != nil:
+		summary, detail := alreadyExistsError(
+			"agent", name,
+			"azurefoundry_agent_v2", "azurefoundry:index:AgentV2",
+		)
+		diags.AddError(summary, detail)
+	case err != nil && !isNotFound(err):
+		diags.AddError("Pre-flight existence check failed", err.Error())
+	}
+	return diags
+}
+
+// warmupIfRequested polls the agent's Responses endpoint until it stops
+// returning HTTP 424 (session_not_ready). Opt-in via plan.Warmup and only
+// meaningful for hosted agents — prompt agents are reachable as soon as
+// Create returns (no per-session sandbox to cold-start).
+func (r *FoundryAgentV2Resource) warmupIfRequested(ctx context.Context, plan FoundryAgentV2ResourceModel, name string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	wantWarmup := !plan.Warmup.IsNull() && !plan.Warmup.IsUnknown() && plan.Warmup.ValueBool()
+	isHosted := plan.Kind.ValueString() == "hosted" || plan.Kind.ValueString() == "container_app"
+	if !wantWarmup || !isHosted {
+		return diags
+	}
+
+	timeout, d := parseWarmupTimeout(plan.WarmupTimeout)
+	diags.Append(d...)
+	if diags.HasError() {
+		return diags
+	}
+
+	tflog.Debug(ctx, "Warming up Foundry agent", map[string]any{"name": name, "timeout": timeout.String()})
+	if err := r.client.WaitForAgentV2Ready(ctx, name, timeout, 5*time.Second); err != nil {
+		diags.AddError("Agent warmup failed", err.Error())
+	}
+	return diags
+}
+
+func parseWarmupTimeout(v types.String) (time.Duration, diag.Diagnostics) {
+	const defaultTimeout = 5 * time.Minute
+	if v.IsNull() || v.IsUnknown() {
+		return defaultTimeout, nil
+	}
+	d, err := time.ParseDuration(v.ValueString())
+	if err != nil {
+		var diags diag.Diagnostics
+		diags.AddError(
+			"Invalid warmup_timeout",
+			fmt.Sprintf("warmup_timeout %q is not a valid Go duration: %s", v.ValueString(), err.Error()),
+		)
+		return 0, diags
+	}
+	if d <= 0 {
+		return defaultTimeout, nil
+	}
+	return d, nil
 }
 
 func (r *FoundryAgentV2Resource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -501,7 +541,7 @@ func (r *FoundryAgentV2Resource) Update(ctx context.Context, req resource.Update
 		return
 	}
 
-	tflog.Debug(ctx, "Updating Foundry agent", map[string]interface{}{"id": state.Name.ValueString()})
+	tflog.Debug(ctx, "Updating Foundry agent", map[string]any{"id": state.Name.ValueString()})
 
 	agentResp, err := r.client.UpdateAgentV2(ctx, state.Name.ValueString(), apiReq)
 	if err != nil {
@@ -524,7 +564,7 @@ func (r *FoundryAgentV2Resource) Delete(ctx context.Context, req resource.Delete
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting Foundry agent", map[string]interface{}{"id": state.Name.ValueString()})
+	tflog.Debug(ctx, "Deleting Foundry agent", map[string]any{"id": state.Name.ValueString()})
 
 	_, err := r.client.DeleteAgentV2(ctx, state.Name.ValueString())
 	if err != nil {
@@ -606,52 +646,75 @@ func buildAgentDefinition(ctx context.Context, m FoundryAgentV2ResourceModel) (c
 		Model:        m.Model.ValueString(),
 		Instructions: m.Instructions.ValueString(),
 	}
+
 	tools, d := extractV2Tools(ctx, m.Tools)
 	diags.Append(d...)
 	def.Tools = tools
 
-	if !m.StructuredInputsJSON.IsNull() && !m.StructuredInputsJSON.IsUnknown() && m.StructuredInputsJSON.ValueString() != "" {
-		var structured map[string]interface{}
-		if err := json.Unmarshal([]byte(m.StructuredInputsJSON.ValueString()), &structured); err != nil {
-			diags.AddError("Invalid structured_inputs_json", err.Error())
-		} else {
-			def.StructuredInputs = structured
-		}
+	if structured, d := decodeStructuredInputs(m.StructuredInputsJSON); structured != nil {
+		def.StructuredInputs = structured
+	} else {
+		diags.Append(d...)
 	}
 
-	// Hosted-agent / container_app wire-up. Only emit these fields when the
-	// user set them; Foundry rejects the envelope for prompt agents.
-	if !m.Image.IsNull() && !m.Image.IsUnknown() {
-		def.Image = m.Image.ValueString()
-	}
-	if !m.Cpu.IsNull() && !m.Cpu.IsUnknown() {
-		def.Cpu = m.Cpu.ValueString()
-	}
-	if !m.Memory.IsNull() && !m.Memory.IsUnknown() {
-		def.Memory = m.Memory.ValueString()
-	}
-	if !m.ContainerProtocolVersions.IsNull() && !m.ContainerProtocolVersions.IsUnknown() {
-		var pvs []protocolVersionModel
-		diags.Append(m.ContainerProtocolVersions.ElementsAs(ctx, &pvs, false)...)
-		records := make([]client.ProtocolVersionRecord, 0, len(pvs))
-		for _, pv := range pvs {
-			records = append(records, client.ProtocolVersionRecord{
-				Protocol: pv.Protocol.ValueString(),
-				Version:  pv.Version.ValueString(),
-			})
-		}
-		def.ContainerProtocolVersions = records
-	}
-	if !m.EnvironmentVariables.IsNull() && !m.EnvironmentVariables.IsUnknown() {
-		raw := make(map[string]types.String, len(m.EnvironmentVariables.Elements()))
-		diags.Append(m.EnvironmentVariables.ElementsAs(ctx, &raw, false)...)
-		env := make(map[string]string, len(raw))
-		for k, v := range raw {
-			env[k] = v.ValueString()
-		}
-		def.EnvironmentVariables = env
-	}
+	diags.Append(applyHostedAgentFields(ctx, m, &def)...)
 	return def, diags
+}
+
+func decodeStructuredInputs(v types.String) (map[string]any, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+		return nil, diags
+	}
+	var structured map[string]any
+	if err := json.Unmarshal([]byte(v.ValueString()), &structured); err != nil {
+		diags.AddError("Invalid structured_inputs_json", err.Error())
+		return nil, diags
+	}
+	return structured, diags
+}
+
+// applyHostedAgentFields populates the hosted-only fields on def. Only emits
+// values the user actually set — Foundry rejects the hosted envelope for
+// prompt agents.
+func applyHostedAgentFields(ctx context.Context, m FoundryAgentV2ResourceModel, def *client.AgentDefinitionV2) diag.Diagnostics {
+	var diags diag.Diagnostics
+	def.Image = stringOrEmpty(m.Image)
+	def.CPU = stringOrEmpty(m.CPU)
+	def.Memory = stringOrEmpty(m.Memory)
+
+	pvs, d := extractProtocolVersions(ctx, m.ContainerProtocolVersions)
+	diags.Append(d...)
+	def.ContainerProtocolVersions = pvs
+
+	env, d := extractMetadata(ctx, m.EnvironmentVariables)
+	diags.Append(d...)
+	def.EnvironmentVariables = env
+
+	return diags
+}
+
+func stringOrEmpty(v types.String) string {
+	if v.IsNull() || v.IsUnknown() {
+		return ""
+	}
+	return v.ValueString()
+}
+
+func extractProtocolVersions(ctx context.Context, l types.List) ([]client.ProtocolVersionRecord, diag.Diagnostics) {
+	if l.IsNull() || l.IsUnknown() {
+		return nil, nil
+	}
+	var pvs []protocolVersionModel
+	diags := l.ElementsAs(ctx, &pvs, false)
+	out := make([]client.ProtocolVersionRecord, 0, len(pvs))
+	for _, pv := range pvs {
+		out = append(out, client.ProtocolVersionRecord{
+			Protocol: pv.Protocol.ValueString(),
+			Version:  pv.Version.ValueString(),
+		})
+	}
+	return out, diags
 }
 
 type protocolVersionModel struct {
@@ -696,10 +759,10 @@ func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryA
 	} else {
 		m.Image = types.StringNull()
 	}
-	if def.Cpu != "" {
-		m.Cpu = types.StringValue(def.Cpu)
+	if def.CPU != "" {
+		m.CPU = types.StringValue(def.CPU)
 	} else {
-		m.Cpu = types.StringNull()
+		m.CPU = types.StringNull()
 	}
 	if def.Memory != "" {
 		m.Memory = types.StringValue(def.Memory)
@@ -747,7 +810,7 @@ func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryA
 
 	toolObjects := make([]attr.Value, 0, len(r.Versions.Latest.Definition.Tools))
 	for _, t := range r.Versions.Latest.Definition.Tools {
-		toolMap, ok := t.(map[string]interface{})
+		toolMap, ok := t.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -765,7 +828,27 @@ func responseToV2Model(_ context.Context, r *client.AgentResponseV2, m *FoundryA
 // Wire ↔ object conversion for individual tool variants
 // ─────────────────────────────────────────────────────────────────────────────
 
-func extractV2Tools(ctx context.Context, toolsList types.List) ([]interface{}, diag.Diagnostics) {
+// toolExtractor builds the wire-format payload for a single tool entry from
+// its config-side Plugin Framework model.
+type toolExtractor func(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics)
+
+// toolExtractors dispatches by the user-facing `type` value. Each entry is
+// responsible for *just* its tool's branch — keeping any single extractor
+// well below the gocyclo budget. Adding a new tool type is one map entry +
+// one function below, no surgery on extractV2Tools itself.
+var toolExtractors = map[string]toolExtractor{
+	"file_search":        extractFileSearchTool,
+	"code_interpreter":   extractCodeInterpreterTool,
+	"web_search":         extractWebSearchTool,
+	"bing_grounding":     extractBingGroundingTool,
+	"function":           extractFunctionTool,
+	"openapi":            extractOpenAPITool,
+	"mcp":                extractMCPTool,
+	"azure_ai_search":    extractAzureAISearchTool,
+	toolTypeMemorySearch: extractMemorySearchTool,
+}
+
+func extractV2Tools(ctx context.Context, toolsList types.List) ([]any, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	if toolsList.IsNull() || toolsList.IsUnknown() {
 		return nil, diags
@@ -777,165 +860,227 @@ func extractV2Tools(ctx context.Context, toolsList types.List) ([]interface{}, d
 		return nil, diags
 	}
 
-	result := make([]interface{}, 0, len(tools))
-	for _, t := range tools {
+	result := make([]any, 0, len(tools))
+	for i := range tools {
+		t := &tools[i]
 		tt := t.Type.ValueString()
-		switch tt {
-		case "file_search":
-			var vsIDs []string
-			if !t.VectorStoreIDs.IsNull() && !t.VectorStoreIDs.IsUnknown() {
-				diags.Append(t.VectorStoreIDs.ElementsAs(ctx, &vsIDs, false)...)
-			}
-			result = append(result, client.FileSearchToolV2{
-				Type:           "file_search",
-				VectorStoreIDs: vsIDs,
-				MaxNumResults:  int(t.MaxNumResults.ValueInt64()),
-			})
-		case "code_interpreter":
-			tool := client.CodeInterpreterToolV2{Type: "code_interpreter"}
-			if !t.CodeInterpreter.IsNull() && !t.CodeInterpreter.IsUnknown() {
-				attrs := t.CodeInterpreter.Attributes()
-				container := &client.CodeInterpreterContainer{Type: "auto"}
-				if v, ok := attrs["file_ids"].(types.List); ok && !v.IsNull() && !v.IsUnknown() {
-					var ids []string
-					diags.Append(v.ElementsAs(ctx, &ids, false)...)
-					container.FileIDs = ids
-				}
-				tool.Container = container
-			}
-			result = append(result, tool)
-		case "web_search":
-			result = append(result, client.WebSearchToolV2{Type: "web_search"})
-		case "bing_grounding":
-			tool := client.BingGroundingToolV2{Type: "bing_grounding"}
-			if !t.BingGrounding.IsNull() && !t.BingGrounding.IsUnknown() {
-				attrs := t.BingGrounding.Attributes()
-				if v, ok := attrs["connection_id"].(types.String); ok {
-					tool.BingGrounding.ConnectionID = v.ValueString()
-				}
-			}
-			result = append(result, tool)
-		case "function":
-			tool := client.FunctionToolV2{Type: "function"}
-			if !t.Function.IsNull() && !t.Function.IsUnknown() {
-				attrs := t.Function.Attributes()
-				if v, ok := attrs["name"].(types.String); ok {
-					tool.Name = v.ValueString()
-				}
-				if v, ok := attrs["description"].(types.String); ok {
-					tool.Description = v.ValueString()
-				}
-				if v, ok := attrs["parameters_json"].(types.String); ok && !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
-					var params map[string]interface{}
-					if err := json.Unmarshal([]byte(v.ValueString()), &params); err != nil {
-						diags.AddError("Invalid function.parameters_json", err.Error())
-					} else {
-						tool.Parameters = params
-					}
-				}
-			}
-			result = append(result, tool)
-		case "openapi":
-			tool := client.OpenAPIToolV2{Type: "openapi"}
-			if !t.OpenAPI.IsNull() && !t.OpenAPI.IsUnknown() {
-				attrs := t.OpenAPI.Attributes()
-				if v, ok := attrs["name"].(types.String); ok {
-					tool.OpenAPI.Name = v.ValueString()
-				}
-				if v, ok := attrs["description"].(types.String); ok {
-					tool.OpenAPI.Description = v.ValueString()
-				}
-				if v, ok := attrs["spec_json"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
-					var spec map[string]interface{}
-					if err := json.Unmarshal([]byte(v.ValueString()), &spec); err != nil {
-						diags.AddError("Invalid openapi.spec_json", err.Error())
-					} else {
-						tool.OpenAPI.Spec = spec
-					}
-				}
-				authType := "anonymous"
-				if v, ok := attrs["auth_type"].(types.String); ok && !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
-					authType = v.ValueString()
-				}
-				tool.OpenAPI.Auth = client.OpenAPIAuth{Type: authType}
-			}
-			result = append(result, tool)
-		case "mcp":
-			tool := client.MCPToolV2{Type: "mcp"}
-			if !t.MCP.IsNull() && !t.MCP.IsUnknown() {
-				attrs := t.MCP.Attributes()
-				if v, ok := attrs["server_label"].(types.String); ok {
-					tool.ServerLabel = v.ValueString()
-				}
-				if v, ok := attrs["server_url"].(types.String); ok {
-					tool.ServerURL = v.ValueString()
-				}
-				if v, ok := attrs["require_approval"].(types.String); ok {
-					tool.RequireApproval = v.ValueString()
-				}
-				if v, ok := attrs["project_connection_id"].(types.String); ok {
-					tool.ProjectConnectionID = v.ValueString()
-				}
-			}
-			result = append(result, tool)
-		case "azure_ai_search":
-			tool := client.AzureAISearchToolV2{Type: "azure_ai_search"}
-			if !t.AzureAISearch.IsNull() && !t.AzureAISearch.IsUnknown() {
-				attrs := t.AzureAISearch.Attributes()
-				if v, ok := attrs["indexes"].(types.List); ok && !v.IsNull() && !v.IsUnknown() {
-					for _, elem := range v.Elements() {
-						idxObj, ok := elem.(types.Object)
-						if !ok {
-							continue
-						}
-						a := idxObj.Attributes()
-						idx := client.AzureAISearchIndex{}
-						if vv, ok := a["project_connection_id"].(types.String); ok {
-							idx.ProjectConnectionID = vv.ValueString()
-						}
-						if vv, ok := a["index_name"].(types.String); ok {
-							idx.IndexName = vv.ValueString()
-						}
-						if vv, ok := a["query_type"].(types.String); ok {
-							idx.QueryType = vv.ValueString()
-						}
-						if vv, ok := a["top_k"].(types.Int64); ok {
-							idx.TopK = int(vv.ValueInt64())
-						}
-						tool.AzureAISearch.Indexes = append(tool.AzureAISearch.Indexes, idx)
-					}
-				}
-			}
-			result = append(result, tool)
-		case "memory_search":
-			tool := client.MemorySearchToolV2{Type: "memory_search_preview"}
-			if !t.MemorySearch.IsNull() && !t.MemorySearch.IsUnknown() {
-				attrs := t.MemorySearch.Attributes()
-				if v, ok := attrs["memory_store_name"].(types.String); ok {
-					tool.MemoryStoreName = v.ValueString()
-				}
-				if v, ok := attrs["scope"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
-					tool.Scope = v.ValueString()
-				}
-				if v, ok := attrs["update_delay"].(types.Int64); ok && !v.IsNull() && !v.IsUnknown() {
-					tool.UpdateDelay = int(v.ValueInt64())
-				}
-			}
-			result = append(result, tool)
-		default:
+		extractor, ok := toolExtractors[tt]
+		if !ok {
 			diags.AddError("Unsupported tool type", fmt.Sprintf("tool type %q is not supported", tt))
+			continue
 		}
+		payload, d := extractor(ctx, t)
+		diags.Append(d...)
+		result = append(result, payload)
 	}
 	return result, diags
 }
 
+func extractFileSearchTool(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	vsIDs, diags := extractStringList(ctx, t.VectorStoreIDs)
+	return client.FileSearchToolV2{
+		Type:           "file_search",
+		VectorStoreIDs: vsIDs,
+		MaxNumResults:  int(t.MaxNumResults.ValueInt64()),
+	}, diags
+}
+
+func extractCodeInterpreterTool(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.CodeInterpreterToolV2{Type: "code_interpreter"}
+	if t.CodeInterpreter.IsNull() || t.CodeInterpreter.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.CodeInterpreter.Attributes()
+	container := &client.CodeInterpreterContainer{Type: "auto"}
+	var diags diag.Diagnostics
+	if v, ok := attrs["file_ids"].(types.List); ok {
+		ids, d := extractStringList(ctx, v)
+		diags.Append(d...)
+		container.FileIDs = ids
+	}
+	tool.Container = container
+	return tool, diags
+}
+
+func extractWebSearchTool(_ context.Context, _ *toolModelV2) (any, diag.Diagnostics) {
+	return client.WebSearchToolV2{Type: "web_search"}, nil
+}
+
+func extractBingGroundingTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.BingGroundingToolV2{Type: "bing_grounding"}
+	if t.BingGrounding.IsNull() || t.BingGrounding.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.BingGrounding.Attributes()
+	tool.BingGrounding.ConnectionID = stringAttr(attrs, "connection_id")
+	return tool, nil
+}
+
+func extractFunctionTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.FunctionToolV2{Type: "function"}
+	if t.Function.IsNull() || t.Function.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.Function.Attributes()
+	tool.Name = stringAttr(attrs, "name")
+	tool.Description = stringAttr(attrs, "description")
+	params, diags := decodeJSONStringAttr(attrs, "parameters_json", "function.parameters_json")
+	if params != nil {
+		tool.Parameters = params
+	}
+	return tool, diags
+}
+
+func extractOpenAPITool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.OpenAPIToolV2{Type: "openapi"}
+	if t.OpenAPI.IsNull() || t.OpenAPI.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.OpenAPI.Attributes()
+	tool.OpenAPI.Name = stringAttr(attrs, "name")
+	tool.OpenAPI.Description = stringAttr(attrs, "description")
+
+	spec, diags := decodeJSONStringAttr(attrs, "spec_json", "openapi.spec_json")
+	if spec != nil {
+		tool.OpenAPI.Spec = spec
+	}
+
+	authType := stringAttr(attrs, "auth_type")
+	if authType == "" {
+		authType = "anonymous"
+	}
+	tool.OpenAPI.Auth = client.OpenAPIAuth{Type: authType}
+	return tool, diags
+}
+
+func extractMCPTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.MCPToolV2{Type: "mcp"}
+	if t.MCP.IsNull() || t.MCP.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.MCP.Attributes()
+	tool.ServerLabel = stringAttr(attrs, "server_label")
+	tool.ServerURL = stringAttr(attrs, "server_url")
+	tool.RequireApproval = stringAttr(attrs, "require_approval")
+	tool.ProjectConnectionID = stringAttr(attrs, "project_connection_id")
+	return tool, nil
+}
+
+func extractAzureAISearchTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.AzureAISearchToolV2{Type: "azure_ai_search"}
+	if t.AzureAISearch.IsNull() || t.AzureAISearch.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.AzureAISearch.Attributes()
+	v, ok := attrs["indexes"].(types.List)
+	if !ok || v.IsNull() || v.IsUnknown() {
+		return tool, nil
+	}
+	for _, elem := range v.Elements() {
+		idxObj, ok := elem.(types.Object)
+		if !ok {
+			continue
+		}
+		tool.AzureAISearch.Indexes = append(tool.AzureAISearch.Indexes, buildAzureAISearchIndex(idxObj.Attributes()))
+	}
+	return tool, nil
+}
+
+func buildAzureAISearchIndex(a map[string]attr.Value) client.AzureAISearchIndex {
+	idx := client.AzureAISearchIndex{
+		ProjectConnectionID: stringAttr(a, "project_connection_id"),
+		IndexName:           stringAttr(a, "index_name"),
+		QueryType:           stringAttr(a, "query_type"),
+	}
+	if v, ok := a["top_k"].(types.Int64); ok {
+		idx.TopK = int(v.ValueInt64())
+	}
+	return idx
+}
+
+func extractMemorySearchTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	tool := client.MemorySearchToolV2{Type: toolTypeMemorySearchPreview}
+	if t.MemorySearch.IsNull() || t.MemorySearch.IsUnknown() {
+		return tool, nil
+	}
+	attrs := t.MemorySearch.Attributes()
+	tool.MemoryStoreName = stringAttr(attrs, "memory_store_name")
+	tool.Scope = stringAttr(attrs, "scope")
+	if v, ok := attrs["update_delay"].(types.Int64); ok && !v.IsNull() && !v.IsUnknown() {
+		tool.UpdateDelay = int(v.ValueInt64())
+	}
+	return tool, nil
+}
+
+// stringAttr extracts a string attribute, returning "" when the key is
+// missing, the type doesn't match, or the value is null/unknown. Used by
+// the per-tool extractors to keep them branch-light.
+func stringAttr(attrs map[string]attr.Value, key string) string {
+	v, ok := attrs[key].(types.String)
+	if !ok || v.IsNull() || v.IsUnknown() {
+		return ""
+	}
+	return v.ValueString()
+}
+
+// decodeJSONStringAttr unmarshals a string attribute holding JSON. Returns
+// (nil, nil) when the key is absent or empty; (nil, diag) on malformed JSON.
+// label is the user-facing attribute name used in error messages.
+func decodeJSONStringAttr(attrs map[string]attr.Value, key, label string) (map[string]any, diag.Diagnostics) {
+	v, ok := attrs[key].(types.String)
+	if !ok || v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+		return nil, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(v.ValueString()), &out); err != nil {
+		var diags diag.Diagnostics
+		diags.AddError("Invalid "+label, err.Error())
+		return nil, diags
+	}
+	return out, nil
+}
+
+// toolWirer fills the per-tool variant slot in `values`. Returns any
+// diagnostics from constructing nested types.Object/types.List values.
+type toolWirer func(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics
+
+var toolWirers = map[string]toolWirer{
+	"file_search":        wireFileSearchTool,
+	"code_interpreter":   wireCodeInterpreterTool,
+	"bing_grounding":     wireBingGroundingTool,
+	"function":           wireFunctionTool,
+	"openapi":            wireOpenAPITool,
+	"mcp":                wireMCPTool,
+	"azure_ai_search":    wireAzureAISearchTool,
+	toolTypeMemorySearch: wireMemorySearchTool,
+}
+
 // wireToolToObject builds a tool list element with all variant slots null
 // except the one matching the wire payload.
-func wireToolToObject(toolMap map[string]interface{}) (types.Object, diag.Diagnostics) {
+func wireToolToObject(toolMap map[string]any) (types.Object, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	tt, _ := toolMap["type"].(string)
 
-	values := map[string]attr.Value{
+	values := nullToolVariantSlots(tt)
+
+	// Foundry emits the memory-search tool with type="memory_search_preview"
+	// during preview; fold it back onto the stable "memory_search" schema key.
+	if tt == toolTypeMemorySearchPreview {
+		tt = toolTypeMemorySearch
+		values["type"] = types.StringValue(toolTypeMemorySearch)
+	}
+
+	if wirer, ok := toolWirers[tt]; ok {
+		diags.Append(wirer(toolMap, values)...)
+	}
+
+	obj, d := types.ObjectValue(toolAttrTypesV2, values)
+	diags.Append(d...)
+	return obj, diags
+}
+
+func nullToolVariantSlots(tt string) map[string]attr.Value {
+	return map[string]attr.Value{
 		"type":             types.StringValue(tt),
 		"vector_store_ids": types.ListNull(types.StringType),
 		"max_num_results":  types.Int64Null(),
@@ -947,153 +1092,169 @@ func wireToolToObject(toolMap map[string]interface{}) (types.Object, diag.Diagno
 		"bing_grounding":   types.ObjectNull(bingGroundingAttrTypes),
 		"memory_search":    types.ObjectNull(memorySearchAttrTypes),
 	}
+}
 
-	// Foundry emits the memory-search tool with type="memory_search_preview"
-	// during preview; fold it back onto the stable "memory_search" schema key.
-	if tt == "memory_search_preview" {
-		tt = "memory_search"
-		values["type"] = types.StringValue("memory_search")
+func wireFileSearchTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if vsRaw, ok := toolMap["vector_store_ids"].([]any); ok {
+		lst, d := stringListFromAny(vsRaw)
+		diags.Append(d...)
+		values["vector_store_ids"] = lst
 	}
-
-	switch tt {
-	case "file_search":
-		if vsRaw, ok := toolMap["vector_store_ids"].([]interface{}); ok {
-			vals := make([]attr.Value, len(vsRaw))
-			for i, v := range vsRaw {
-				vals[i] = types.StringValue(fmt.Sprintf("%v", v))
-			}
-			lst, d := types.ListValue(types.StringType, vals)
-			diags.Append(d...)
-			values["vector_store_ids"] = lst
-		}
-		if mr, ok := toolMap["max_num_results"].(float64); ok {
-			values["max_num_results"] = types.Int64Value(int64(mr))
-		}
-	case "code_interpreter":
-		if c, ok := toolMap["container"].(map[string]interface{}); ok {
-			fileIDsRaw, _ := c["file_ids"].([]interface{})
-			vals := make([]attr.Value, len(fileIDsRaw))
-			for i, v := range fileIDsRaw {
-				vals[i] = types.StringValue(fmt.Sprintf("%v", v))
-			}
-			lst, d := types.ListValue(types.StringType, vals)
-			diags.Append(d...)
-			obj, d := types.ObjectValue(codeInterpreterAttrTypes, map[string]attr.Value{"file_ids": lst})
-			diags.Append(d...)
-			values["code_interpreter"] = obj
-		}
-	case "bing_grounding":
-		conn := ""
-		if bg, ok := toolMap["bing_grounding"].(map[string]interface{}); ok {
-			if cid, ok := bg["connection_id"].(string); ok {
-				conn = cid
-			}
-		}
-		obj, d := types.ObjectValue(bingGroundingAttrTypes, map[string]attr.Value{
-			"connection_id": types.StringValue(conn),
-		})
-		diags.Append(d...)
-		values["bing_grounding"] = obj
-	case "function":
-		name, _ := toolMap["name"].(string)
-		desc, _ := toolMap["description"].(string)
-		paramsJSON := ""
-		if params, ok := toolMap["parameters"].(map[string]interface{}); ok {
-			if buf, err := json.Marshal(params); err == nil {
-				paramsJSON = string(buf)
-			}
-		}
-		obj, d := types.ObjectValue(functionAttrTypes, map[string]attr.Value{
-			"name":            types.StringValue(name),
-			"description":     types.StringValue(desc),
-			"parameters_json": types.StringValue(paramsJSON),
-		})
-		diags.Append(d...)
-		values["function"] = obj
-	case "openapi":
-		oa, _ := toolMap["openapi"].(map[string]interface{})
-		name, _ := oa["name"].(string)
-		desc, _ := oa["description"].(string)
-		specJSON := ""
-		if spec, ok := oa["spec"].(map[string]interface{}); ok {
-			if buf, err := json.Marshal(spec); err == nil {
-				specJSON = string(buf)
-			}
-		}
-		authType := ""
-		if auth, ok := oa["auth"].(map[string]interface{}); ok {
-			if at, ok := auth["type"].(string); ok {
-				authType = at
-			}
-		}
-		obj, d := types.ObjectValue(openapiAttrTypes, map[string]attr.Value{
-			"name":        types.StringValue(name),
-			"description": types.StringValue(desc),
-			"spec_json":   types.StringValue(specJSON),
-			"auth_type":   types.StringValue(authType),
-		})
-		diags.Append(d...)
-		values["openapi"] = obj
-	case "mcp":
-		serverLabel, _ := toolMap["server_label"].(string)
-		serverURL, _ := toolMap["server_url"].(string)
-		requireApproval, _ := toolMap["require_approval"].(string)
-		connID, _ := toolMap["project_connection_id"].(string)
-		obj, d := types.ObjectValue(mcpAttrTypes, map[string]attr.Value{
-			"server_label":          types.StringValue(serverLabel),
-			"server_url":            types.StringValue(serverURL),
-			"require_approval":      types.StringValue(requireApproval),
-			"project_connection_id": types.StringValue(connID),
-		})
-		diags.Append(d...)
-		values["mcp"] = obj
-	case "azure_ai_search":
-		ais, _ := toolMap["azure_ai_search"].(map[string]interface{})
-		idxRaw, _ := ais["indexes"].([]interface{})
-		idxObjs := make([]attr.Value, 0, len(idxRaw))
-		for _, ir := range idxRaw {
-			im, ok := ir.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			conn, _ := im["project_connection_id"].(string)
-			idxName, _ := im["index_name"].(string)
-			qt, _ := im["query_type"].(string)
-			topK := int64(0)
-			if tk, ok := im["top_k"].(float64); ok {
-				topK = int64(tk)
-			}
-			obj, d := types.ObjectValue(azureAISearchIndexAttrTypes, map[string]attr.Value{
-				"project_connection_id": types.StringValue(conn),
-				"index_name":            types.StringValue(idxName),
-				"query_type":            types.StringValue(qt),
-				"top_k":                 types.Int64Value(topK),
-			})
-			diags.Append(d...)
-			idxObjs = append(idxObjs, obj)
-		}
-		idxList, d := types.ListValue(types.ObjectType{AttrTypes: azureAISearchIndexAttrTypes}, idxObjs)
-		diags.Append(d...)
-		obj, d := types.ObjectValue(azureAISearchAttrTypes, map[string]attr.Value{"indexes": idxList})
-		diags.Append(d...)
-		values["azure_ai_search"] = obj
-	case "memory_search":
-		storeName, _ := toolMap["memory_store_name"].(string)
-		scope, _ := toolMap["scope"].(string)
-		delay := int64(0)
-		if d, ok := toolMap["update_delay"].(float64); ok {
-			delay = int64(d)
-		}
-		obj, d := types.ObjectValue(memorySearchAttrTypes, map[string]attr.Value{
-			"memory_store_name": types.StringValue(storeName),
-			"scope":             types.StringValue(scope),
-			"update_delay":      types.Int64Value(delay),
-		})
-		diags.Append(d...)
-		values["memory_search"] = obj
+	if mr, ok := toolMap["max_num_results"].(float64); ok {
+		values["max_num_results"] = types.Int64Value(int64(mr))
 	}
+	return diags
+}
 
-	obj, d := types.ObjectValue(toolAttrTypesV2, values)
+func wireCodeInterpreterTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	c, ok := toolMap["container"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var diags diag.Diagnostics
+	fileIDsRaw, _ := c["file_ids"].([]any)
+	lst, d := stringListFromAny(fileIDsRaw)
 	diags.Append(d...)
-	return obj, diags
+	obj, d := types.ObjectValue(codeInterpreterAttrTypes, map[string]attr.Value{"file_ids": lst})
+	diags.Append(d...)
+	values["code_interpreter"] = obj
+	return diags
+}
+
+func wireBingGroundingTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	conn := stringFromMap(asMap(toolMap["bing_grounding"]), "connection_id")
+	obj, diags := types.ObjectValue(bingGroundingAttrTypes, map[string]attr.Value{
+		"connection_id": types.StringValue(conn),
+	})
+	values["bing_grounding"] = obj
+	return diags
+}
+
+func wireFunctionTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	obj, diags := types.ObjectValue(functionAttrTypes, map[string]attr.Value{
+		"name":            types.StringValue(stringFromMap(toolMap, "name")),
+		"description":     types.StringValue(stringFromMap(toolMap, "description")),
+		"parameters_json": types.StringValue(jsonStringFromMap(toolMap, "parameters")),
+	})
+	values["function"] = obj
+	return diags
+}
+
+func wireOpenAPITool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	oa := asMap(toolMap["openapi"])
+	authType := stringFromMap(asMap(oa["auth"]), "type")
+	obj, diags := types.ObjectValue(openapiAttrTypes, map[string]attr.Value{
+		"name":        types.StringValue(stringFromMap(oa, "name")),
+		"description": types.StringValue(stringFromMap(oa, "description")),
+		"spec_json":   types.StringValue(jsonStringFromMap(oa, "spec")),
+		"auth_type":   types.StringValue(authType),
+	})
+	values["openapi"] = obj
+	return diags
+}
+
+func wireMCPTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	obj, diags := types.ObjectValue(mcpAttrTypes, map[string]attr.Value{
+		"server_label":          types.StringValue(stringFromMap(toolMap, "server_label")),
+		"server_url":            types.StringValue(stringFromMap(toolMap, "server_url")),
+		"require_approval":      types.StringValue(stringFromMap(toolMap, "require_approval")),
+		"project_connection_id": types.StringValue(stringFromMap(toolMap, "project_connection_id")),
+	})
+	values["mcp"] = obj
+	return diags
+}
+
+func wireAzureAISearchTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	var diags diag.Diagnostics
+	ais := asMap(toolMap["azure_ai_search"])
+	idxRaw, _ := ais["indexes"].([]any)
+
+	idxObjs := make([]attr.Value, 0, len(idxRaw))
+	for _, ir := range idxRaw {
+		im, ok := ir.(map[string]any)
+		if !ok {
+			continue
+		}
+		obj, d := wireAzureAISearchIndex(im)
+		diags.Append(d...)
+		idxObjs = append(idxObjs, obj)
+	}
+
+	idxList, d := types.ListValue(types.ObjectType{AttrTypes: azureAISearchIndexAttrTypes}, idxObjs)
+	diags.Append(d...)
+	obj, d := types.ObjectValue(azureAISearchAttrTypes, map[string]attr.Value{"indexes": idxList})
+	diags.Append(d...)
+	values["azure_ai_search"] = obj
+	return diags
+}
+
+func wireAzureAISearchIndex(im map[string]any) (types.Object, diag.Diagnostics) {
+	topK := int64(0)
+	if tk, ok := im["top_k"].(float64); ok {
+		topK = int64(tk)
+	}
+	return types.ObjectValue(azureAISearchIndexAttrTypes, map[string]attr.Value{
+		"project_connection_id": types.StringValue(stringFromMap(im, "project_connection_id")),
+		"index_name":            types.StringValue(stringFromMap(im, "index_name")),
+		"query_type":            types.StringValue(stringFromMap(im, "query_type")),
+		"top_k":                 types.Int64Value(topK),
+	})
+}
+
+func wireMemorySearchTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
+	delay := int64(0)
+	if d, ok := toolMap["update_delay"].(float64); ok {
+		delay = int64(d)
+	}
+	obj, diags := types.ObjectValue(memorySearchAttrTypes, map[string]attr.Value{
+		"memory_store_name": types.StringValue(stringFromMap(toolMap, "memory_store_name")),
+		"scope":             types.StringValue(stringFromMap(toolMap, "scope")),
+		"update_delay":      types.Int64Value(delay),
+	})
+	values["memory_search"] = obj
+	return diags
+}
+
+// asMap returns the value as a map[string]any, or nil when v isn't one. Lets
+// callers chain through the dynamically-typed wire payload without nested ok-checks.
+func asMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return nil
+}
+
+func stringFromMap(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	if s, ok := m[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// jsonStringFromMap re-marshals a nested map back to its JSON wire form so it
+// can round-trip through a string attribute (parameters_json, spec_json, ...).
+// Returns "" when the key is absent or not a map.
+func jsonStringFromMap(m map[string]any, key string) string {
+	sub, ok := m[key].(map[string]any)
+	if !ok {
+		return ""
+	}
+	buf, err := json.Marshal(sub)
+	if err != nil {
+		return ""
+	}
+	return string(buf)
+}
+
+func stringListFromAny(in []any) (types.List, diag.Diagnostics) {
+	vals := make([]attr.Value, len(in))
+	for i, v := range in {
+		s, _ := v.(string)
+		vals[i] = types.StringValue(s)
+	}
+	return types.ListValue(types.StringType, vals)
 }

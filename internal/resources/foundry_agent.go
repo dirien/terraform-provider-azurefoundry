@@ -1,11 +1,13 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
@@ -24,8 +26,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
-var _ resource.Resource = &FoundryAgentResource{}
-var _ resource.ResourceWithImportState = &FoundryAgentResource{}
+var (
+	_ resource.Resource                = &FoundryAgentResource{}
+	_ resource.ResourceWithImportState = &FoundryAgentResource{}
+)
 
 func NewFoundryAgentResource() resource.Resource {
 	return &FoundryAgentResource{}
@@ -36,18 +40,18 @@ type FoundryAgentResource struct {
 }
 
 type FoundryAgentResourceModel struct {
-	ID                     types.String  `tfsdk:"id"`
-	CreatedAt              types.Int64   `tfsdk:"created_at"`
-	Model                  types.String  `tfsdk:"model"`
-	Name                   types.String  `tfsdk:"name"`
-	Description            types.String  `tfsdk:"description"`
-	Instructions           types.String  `tfsdk:"instructions"`
-	Temperature            types.Float64 `tfsdk:"temperature"`
-	TopP                   types.Float64 `tfsdk:"top_p"`
-	Metadata               types.Map     `tfsdk:"metadata"`
-	Tools                  types.List    `tfsdk:"tools"`
-	CodeInterpreterFileIDs types.List    `tfsdk:"code_interpreter_file_ids"`
-	FileSearchVectorStoreIDs types.List  `tfsdk:"file_search_vector_store_ids"`
+	ID                       types.String  `tfsdk:"id"`
+	CreatedAt                types.Int64   `tfsdk:"created_at"`
+	Model                    types.String  `tfsdk:"model"`
+	Name                     types.String  `tfsdk:"name"`
+	Description              types.String  `tfsdk:"description"`
+	Instructions             types.String  `tfsdk:"instructions"`
+	Temperature              types.Float64 `tfsdk:"temperature"`
+	TopP                     types.Float64 `tfsdk:"top_p"`
+	Metadata                 types.Map     `tfsdk:"metadata"`
+	Tools                    types.List    `tfsdk:"tools"`
+	CodeInterpreterFileIDs   types.List    `tfsdk:"code_interpreter_file_ids"`
+	FileSearchVectorStoreIDs types.List    `tfsdk:"file_search_vector_store_ids"`
 }
 
 type toolModel struct {
@@ -108,7 +112,7 @@ func (r *FoundryAgentResource) Schema(_ context.Context, _ resource.SchemaReques
 					stringvalidator.LengthAtMost(256000),
 				},
 			},
-			"temperature": schema.Float64Attribute{ 
+			"temperature": schema.Float64Attribute{
 				MarkdownDescription: "Sampling temperature between 0 and 2.",
 				Optional:            true,
 				Computed:            true,
@@ -207,7 +211,7 @@ func (r *FoundryAgentResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	tflog.Debug(ctx, "Creating Foundry agent", map[string]interface{}{"name": apiReq.Name, "model": apiReq.Model})
+	tflog.Debug(ctx, "Creating Foundry agent", map[string]any{"name": apiReq.Name, "model": apiReq.Model})
 
 	agentResp, err := r.client.CreateAgent(ctx, apiReq)
 	if err != nil {
@@ -266,7 +270,7 @@ func (r *FoundryAgentResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	tflog.Debug(ctx, "Updating Foundry agent", map[string]interface{}{"id": state.ID.ValueString()})
+	tflog.Debug(ctx, "Updating Foundry agent", map[string]any{"id": state.ID.ValueString()})
 
 	agentResp, err := r.client.UpdateAgent(ctx, state.ID.ValueString(), apiReq)
 	if err != nil {
@@ -289,7 +293,7 @@ func (r *FoundryAgentResource) Delete(ctx context.Context, req resource.DeleteRe
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting Foundry agent", map[string]interface{}{"id": state.ID.ValueString()})
+	tflog.Debug(ctx, "Deleting Foundry agent", map[string]any{"id": state.ID.ValueString()})
 
 	_, err := r.client.DeleteAgent(ctx, state.ID.ValueString())
 	if err != nil {
@@ -321,121 +325,140 @@ func (r *FoundryAgentResource) ImportState(ctx context.Context, req resource.Imp
 // Mapping helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+// agentRequestFields holds the wire-format fields shared by Create and Update
+// agent requests. CreateAgentRequest and UpdateAgentRequest only differ in
+// presence of `Model` on Create (it's required there) — the rest is identical.
+type agentRequestFields struct {
+	Model         string
+	Name          string
+	Description   string
+	Instructions  string
+	Tools         []any
+	ToolResources *client.ToolResources
+	Temperature   *float64
+	TopP          *float64
+	Metadata      map[string]string
+}
+
 func modelToCreateRequest(ctx context.Context, m FoundryAgentResourceModel) (client.CreateAgentRequest, diag.Diagnostics) {
-	var diags diag.Diagnostics
-	req := client.CreateAgentRequest{
-		Model:        m.Model.ValueString(),
-		Name:         m.Name.ValueString(),
-		Description:  m.Description.ValueString(),
-		Instructions: m.Instructions.ValueString(),
-	}
-
-	if !m.Temperature.IsNull() && !m.Temperature.IsUnknown() {
-		v := m.Temperature.ValueFloat64()
-		req.Temperature = &v
-	}
-	if !m.TopP.IsNull() && !m.TopP.IsUnknown() {
-		v := m.TopP.ValueFloat64()
-		req.TopP = &v
-	}
-
-	if !m.Metadata.IsNull() && !m.Metadata.IsUnknown() {
-		meta := make(map[string]types.String, len(m.Metadata.Elements()))
-		diags.Append(m.Metadata.ElementsAs(ctx, &meta, false)...)
-		metadata := make(map[string]string, len(meta))
-		for k, v := range meta {
-			metadata[k] = v.ValueString()
-		}
-		req.Metadata = metadata
-	}
-
-	tools, d := extractTools(ctx, m.Tools)
-	diags.Append(d...)
-	req.Tools = tools
-
-	if !m.CodeInterpreterFileIDs.IsNull() && !m.CodeInterpreterFileIDs.IsUnknown() {
-		var fileIDs []string
-		diags.Append(m.CodeInterpreterFileIDs.ElementsAs(ctx, &fileIDs, false)...)
-		if len(fileIDs) > 0 {
-			if req.ToolResources == nil {
-				req.ToolResources = &client.ToolResources{}
-			}
-			req.ToolResources.CodeInterpreter = &client.CodeInterpreterResources{FileIDs: fileIDs}
-		}
-	}
-
-	if !m.FileSearchVectorStoreIDs.IsNull() && !m.FileSearchVectorStoreIDs.IsUnknown() {
-		var vsIDs []string
-		diags.Append(m.FileSearchVectorStoreIDs.ElementsAs(ctx, &vsIDs, false)...)
-		if len(vsIDs) > 0 {
-			if req.ToolResources == nil {
-				req.ToolResources = &client.ToolResources{}
-			}
-			req.ToolResources.FileSearch = &client.FileSearchResources{VectorStoreIDs: vsIDs}
-		}
-	}
-
-	return req, diags
+	f, diags := buildAgentRequestFields(ctx, m)
+	return client.CreateAgentRequest{
+		Model:         f.Model,
+		Name:          f.Name,
+		Description:   f.Description,
+		Instructions:  f.Instructions,
+		Tools:         f.Tools,
+		ToolResources: f.ToolResources,
+		Temperature:   f.Temperature,
+		TopP:          f.TopP,
+		Metadata:      f.Metadata,
+	}, diags
 }
 
 func modelToUpdateRequest(ctx context.Context, m FoundryAgentResourceModel) (client.UpdateAgentRequest, diag.Diagnostics) {
+	f, diags := buildAgentRequestFields(ctx, m)
+	return client.UpdateAgentRequest{
+		Model:         f.Model,
+		Name:          f.Name,
+		Description:   f.Description,
+		Instructions:  f.Instructions,
+		Tools:         f.Tools,
+		ToolResources: f.ToolResources,
+		Temperature:   f.Temperature,
+		TopP:          f.TopP,
+		Metadata:      f.Metadata,
+	}, diags
+}
+
+func buildAgentRequestFields(ctx context.Context, m FoundryAgentResourceModel) (agentRequestFields, diag.Diagnostics) {
 	var diags diag.Diagnostics
-	req := client.UpdateAgentRequest{
+	f := agentRequestFields{
 		Model:        m.Model.ValueString(),
 		Name:         m.Name.ValueString(),
 		Description:  m.Description.ValueString(),
 		Instructions: m.Instructions.ValueString(),
+		Temperature:  optionalFloat64(m.Temperature),
+		TopP:         optionalFloat64(m.TopP),
 	}
 
-	if !m.Temperature.IsNull() && !m.Temperature.IsUnknown() {
-		v := m.Temperature.ValueFloat64()
-		req.Temperature = &v
-	}
-	if !m.TopP.IsNull() && !m.TopP.IsUnknown() {
-		v := m.TopP.ValueFloat64()
-		req.TopP = &v
-	}
-
-	if !m.Metadata.IsNull() && !m.Metadata.IsUnknown() {
-		meta := make(map[string]types.String, len(m.Metadata.Elements()))
-		diags.Append(m.Metadata.ElementsAs(ctx, &meta, false)...)
-		metadata := make(map[string]string, len(meta))
-		for k, v := range meta {
-			metadata[k] = v.ValueString()
-		}
-		req.Metadata = metadata
-	}
+	meta, d := extractMetadata(ctx, m.Metadata)
+	diags.Append(d...)
+	f.Metadata = meta
 
 	tools, d := extractTools(ctx, m.Tools)
 	diags.Append(d...)
-	req.Tools = tools
+	f.Tools = tools
 
-	if !m.CodeInterpreterFileIDs.IsNull() && !m.CodeInterpreterFileIDs.IsUnknown() {
-		var fileIDs []string
-		diags.Append(m.CodeInterpreterFileIDs.ElementsAs(ctx, &fileIDs, false)...)
-		if len(fileIDs) > 0 {
-			if req.ToolResources == nil {
-				req.ToolResources = &client.ToolResources{}
-			}
-			req.ToolResources.CodeInterpreter = &client.CodeInterpreterResources{FileIDs: fileIDs}
-		}
-	}
+	tr, d := buildToolResources(ctx, m)
+	diags.Append(d...)
+	f.ToolResources = tr
 
-	if !m.FileSearchVectorStoreIDs.IsNull() && !m.FileSearchVectorStoreIDs.IsUnknown() {
-		var vsIDs []string
-		diags.Append(m.FileSearchVectorStoreIDs.ElementsAs(ctx, &vsIDs, false)...)
-		if len(vsIDs) > 0 {
-			if req.ToolResources == nil {
-				req.ToolResources = &client.ToolResources{}
-			}
-			req.ToolResources.FileSearch = &client.FileSearchResources{VectorStoreIDs: vsIDs}
-		}
-	}
-
-	return req, diags
+	return f, diags
 }
 
-func responseToModel(ctx context.Context, r *client.AgentResponse, m *FoundryAgentResourceModel) diag.Diagnostics {
+// optionalFloat64 returns a heap-allocated copy when the framework value is
+// set, or nil when it is null/unknown — matches the omitempty wire shape.
+func optionalFloat64(v types.Float64) *float64 {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	out := v.ValueFloat64()
+	return &out
+}
+
+func extractMetadata(ctx context.Context, m types.Map) (map[string]string, diag.Diagnostics) {
+	if m.IsNull() || m.IsUnknown() {
+		return nil, nil
+	}
+	raw := make(map[string]types.String, len(m.Elements()))
+	diags := m.ElementsAs(ctx, &raw, false)
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		out[k] = v.ValueString()
+	}
+	return out, diags
+}
+
+func buildToolResources(ctx context.Context, m FoundryAgentResourceModel) (*client.ToolResources, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	var tr *client.ToolResources
+
+	if fileIDs, d := extractStringList(ctx, m.CodeInterpreterFileIDs); len(fileIDs) > 0 {
+		diags.Append(d...)
+		tr = ensureToolResources(tr)
+		tr.CodeInterpreter = &client.CodeInterpreterResources{FileIDs: fileIDs}
+	} else {
+		diags.Append(d...)
+	}
+
+	if vsIDs, d := extractStringList(ctx, m.FileSearchVectorStoreIDs); len(vsIDs) > 0 {
+		diags.Append(d...)
+		tr = ensureToolResources(tr)
+		tr.FileSearch = &client.FileSearchResources{VectorStoreIDs: vsIDs}
+	} else {
+		diags.Append(d...)
+	}
+
+	return tr, diags
+}
+
+func extractStringList(ctx context.Context, l types.List) ([]string, diag.Diagnostics) {
+	if l.IsNull() || l.IsUnknown() {
+		return nil, nil
+	}
+	var out []string
+	d := l.ElementsAs(ctx, &out, false)
+	return out, d
+}
+
+func ensureToolResources(tr *client.ToolResources) *client.ToolResources {
+	if tr == nil {
+		return &client.ToolResources{}
+	}
+	return tr
+}
+
+func responseToModel(_ context.Context, r *client.AgentResponse, m *FoundryAgentResourceModel) diag.Diagnostics {
 	var diags diag.Diagnostics
 
 	m.ID = types.StringValue(r.ID)
@@ -470,7 +493,7 @@ func responseToModel(ctx context.Context, r *client.AgentResponse, m *FoundryAge
 
 	toolObjects := make([]attr.Value, 0, len(r.Tools))
 	for _, t := range r.Tools {
-		toolMap, ok := t.(map[string]interface{})
+		toolMap, ok := t.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -512,7 +535,7 @@ func responseToModel(ctx context.Context, r *client.AgentResponse, m *FoundryAge
 	return diags
 }
 
-func extractTools(ctx context.Context, toolsList types.List) ([]interface{}, diag.Diagnostics) {
+func extractTools(ctx context.Context, toolsList types.List) ([]any, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	if toolsList.IsNull() || toolsList.IsUnknown() {
 		return nil, diags
@@ -524,7 +547,7 @@ func extractTools(ctx context.Context, toolsList types.List) ([]interface{}, dia
 		return nil, diags
 	}
 
-	tools := make([]interface{}, len(toolModels))
+	tools := make([]any, len(toolModels))
 	for i, t := range toolModels {
 		tools[i] = client.ToolDefinition{Type: t.Type.ValueString()}
 	}
@@ -532,8 +555,8 @@ func extractTools(ctx context.Context, toolsList types.List) ([]interface{}, dia
 }
 
 func isNotFound(err error) bool {
-	apiErr, ok := err.(*client.APIError)
-	return ok && apiErr.StatusCode == 404
+	var apiErr *client.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // isConflict reports whether err is an HTTP 409 from the Foundry API.
@@ -543,17 +566,17 @@ func isNotFound(err error) bool {
 // Terraform state — provider crash, signal interrupt, or a state-write
 // hiccup leaving the data-plane resource live but unmanaged.
 func isConflict(err error) bool {
-	apiErr, ok := err.(*client.APIError)
-	return ok && apiErr.StatusCode == 409
+	var apiErr *client.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict
 }
 
 // alreadyExistsError formats a recovery message for the orphan case.
 // Resource is the human label (e.g. "agent", "memory store"), name is the
 // user-supplied identifier, and tfType / pulumiType are the import-time
 // resource references for each frontend.
-func alreadyExistsError(resourceLabel, name, tfType, pulumiType string) (string, string) {
-	summary := fmt.Sprintf("Foundry %s %q already exists", resourceLabel, name)
-	detail := fmt.Sprintf(
+func alreadyExistsError(resourceLabel, name, tfType, pulumiType string) (summary, detail string) {
+	summary = fmt.Sprintf("Foundry %s %q already exists", resourceLabel, name)
+	detail = fmt.Sprintf(
 		"A %s named %q exists in the Foundry project but is not tracked in "+
 			"this Terraform/Pulumi state. This usually means a prior create "+
 			"succeeded server-side but the result was not recorded in state "+

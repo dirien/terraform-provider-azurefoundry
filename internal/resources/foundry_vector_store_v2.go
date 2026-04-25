@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package resources
@@ -39,13 +39,13 @@ type FoundryVectorStoreV2Resource struct {
 
 type FoundryVectorStoreV2ResourceModel struct {
 	// Computed
-	ID           types.String `tfsdk:"id"`
-	CreatedAt    types.Int64  `tfsdk:"created_at"`
-	Status       types.String `tfsdk:"status"`
-	UsageBytes   types.Int64  `tfsdk:"usage_bytes"`
-	FilesTotal   types.Int64  `tfsdk:"files_total"`
-	FilesReady   types.Int64  `tfsdk:"files_ready"`
-	FilesFailed  types.Int64  `tfsdk:"files_failed"`
+	ID          types.String `tfsdk:"id"`
+	CreatedAt   types.Int64  `tfsdk:"created_at"`
+	Status      types.String `tfsdk:"status"`
+	UsageBytes  types.Int64  `tfsdk:"usage_bytes"`
+	FilesTotal  types.Int64  `tfsdk:"files_total"`
+	FilesReady  types.Int64  `tfsdk:"files_ready"`
+	FilesFailed types.Int64  `tfsdk:"files_failed"`
 
 	// Optional
 	Name     types.String `tfsdk:"name"`
@@ -195,7 +195,7 @@ func (r *FoundryVectorStoreV2Resource) Create(ctx context.Context, req resource.
 		return
 	}
 
-	tflog.Debug(ctx, "Creating Foundry vector store", map[string]interface{}{"name": apiReq.Name})
+	tflog.Debug(ctx, "Creating Foundry vector store", map[string]any{"name": apiReq.Name})
 
 	vsResp, err := r.client.CreateVectorStoreV2(ctx, apiReq)
 	if err != nil {
@@ -205,7 +205,7 @@ func (r *FoundryVectorStoreV2Resource) Create(ctx context.Context, req resource.
 
 	// If files were provided, wait for indexing to complete.
 	if len(apiReq.FileIDs) > 0 {
-		tflog.Debug(ctx, "Waiting for vector store to finish indexing", map[string]interface{}{"id": vsResp.ID})
+		tflog.Debug(ctx, "Waiting for vector store to finish indexing", map[string]any{"id": vsResp.ID})
 		vsResp, err = r.client.WaitForVectorStore(ctx, vsResp.ID)
 		if err != nil {
 			resp.Diagnostics.AddError("Error waiting for vector store", err.Error())
@@ -279,7 +279,7 @@ func (r *FoundryVectorStoreV2Resource) Update(ctx context.Context, req resource.
 		}
 	}
 
-	tflog.Debug(ctx, "Updating vector store", map[string]interface{}{"id": state.ID.ValueString()})
+	tflog.Debug(ctx, "Updating vector store", map[string]any{"id": state.ID.ValueString()})
 
 	vsResp, err := r.client.UpdateVectorStoreV2(ctx, state.ID.ValueString(), apiReq)
 	if err != nil {
@@ -302,7 +302,7 @@ func (r *FoundryVectorStoreV2Resource) Delete(ctx context.Context, req resource.
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting vector store", map[string]interface{}{"id": state.ID.ValueString()})
+	tflog.Debug(ctx, "Deleting vector store", map[string]any{"id": state.ID.ValueString()})
 
 	_, err := r.client.DeleteVectorStoreV2(ctx, state.ID.ValueString())
 	if err != nil {

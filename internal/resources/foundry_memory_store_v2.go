@@ -1,4 +1,4 @@
-// Copyright (c) Your Org
+// Copyright (c) Engin Diri
 // SPDX-License-Identifier: MPL-2.0
 
 package resources
@@ -23,8 +23,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
-var _ resource.Resource = &FoundryMemoryStoreV2Resource{}
-var _ resource.ResourceWithImportState = &FoundryMemoryStoreV2Resource{}
+var (
+	_ resource.Resource                = &FoundryMemoryStoreV2Resource{}
+	_ resource.ResourceWithImportState = &FoundryMemoryStoreV2Resource{}
+)
 
 func NewFoundryMemoryStoreV2Resource() resource.Resource {
 	return &FoundryMemoryStoreV2Resource{}
@@ -162,7 +164,7 @@ func (r *FoundryMemoryStoreV2Resource) Create(ctx context.Context, req resource.
 		return
 	}
 
-	tflog.Debug(ctx, "Creating Foundry memory store", map[string]interface{}{"name": apiReq.Name})
+	tflog.Debug(ctx, "Creating Foundry memory store", map[string]any{"name": apiReq.Name})
 
 	if err := r.client.WaitForProjectReady(ctx, 30*time.Minute); err != nil {
 		resp.Diagnostics.AddError("Foundry project not reachable", err.Error())
@@ -254,7 +256,7 @@ func (r *FoundryMemoryStoreV2Resource) Update(ctx context.Context, req resource.
 		apiReq.Metadata = metadata
 	}
 
-	tflog.Debug(ctx, "Updating memory store", map[string]interface{}{"name": state.Name.ValueString()})
+	tflog.Debug(ctx, "Updating memory store", map[string]any{"name": state.Name.ValueString()})
 
 	msResp, err := r.client.UpdateMemoryStore(ctx, state.Name.ValueString(), apiReq)
 	if err != nil {
@@ -277,7 +279,7 @@ func (r *FoundryMemoryStoreV2Resource) Delete(ctx context.Context, req resource.
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting memory store", map[string]interface{}{"name": state.Name.ValueString()})
+	tflog.Debug(ctx, "Deleting memory store", map[string]any{"name": state.Name.ValueString()})
 
 	_, err := r.client.DeleteMemoryStore(ctx, state.Name.ValueString())
 	if err != nil {
