@@ -84,7 +84,22 @@ func (r *FoundryToolboxV2Resource) Schema(_ context.Context, _ resource.SchemaRe
 			"block. The provider sets the required `Foundry-Features: " +
 			"Toolboxes=V1Preview` header on every request, but agent runtimes " +
 			"that consume the endpoint at inference time must set it " +
-			"themselves.",
+			"themselves.\n\n" +
+			"### Authenticated tools — wire a `RemoteTool` project connection\n" +
+			"For MCP and OpenAPI tools that need API keys, bearer tokens, or " +
+			"managed-identity auth, store the credentials in a project " +
+			"connection with `category = \"RemoteTool\"` and reference it from " +
+			"the tool block via `project_connection_id`. **This provider does " +
+			"not manage project connections** — they live on the ARM management " +
+			"plane and are exposed by the upstream Azure providers:\n\n" +
+			"- **Terraform:** [`azurerm_cognitive_account_project_connection`]" +
+			"(https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/cognitive_account_project_connection)\n" +
+			"- **Pulumi:** [`azure-native:cognitiveservices:Connection`]" +
+			"(https://www.pulumi.com/registry/packages/azure-native/api-docs/cognitiveservices/connection/)\n\n" +
+			"Pass the connection's *name* (not its full ARM ID) as " +
+			"`project_connection_id` — Foundry resolves it within the project " +
+			"scope. See the example for an end-to-end wiring of an `azurerm` " +
+			"connection into a toolbox MCP tool.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Foundry-assigned toolbox ID, or the toolbox name when no separate ID is returned.",
