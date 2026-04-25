@@ -169,45 +169,67 @@ func (r *FoundryAgentV2Resource) Metadata(_ context.Context, req resource.Metada
 
 func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages an Azure AI Foundry Agent (v2 API).",
+		MarkdownDescription: "Manages an Azure AI Foundry Agent (v2 API).\n\n" +
+			"The v2 API supports prompt agents (LLM + tools) and hosted agents " +
+			"(`kind = \"hosted\"` or `\"container_app\"`) where you ship a container image " +
+			"that speaks the Foundry agent protocols. Most fields are common to both kinds; " +
+			"the hosted-only fields (`image`, `cpu`, `memory`, `container_protocol_versions`, " +
+			"`environment_variables`) are ignored when `kind = \"prompt\"`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				Computed: true,
+				MarkdownDescription: "Foundry-assigned agent ID. Stable for the lifetime of the agent.",
+				Computed:            true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
+				MarkdownDescription: "User-supplied agent name. Unique within the Foundry project. " +
+					"Changing this forces replacement.",
 				Required: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"description": schema.StringAttribute{
-				Optional: true,
-				Computed: true,
+				MarkdownDescription: "Human-readable description, surfaced in the Foundry portal.",
+				Optional:            true,
+				Computed:            true,
 			},
 			"created_at": schema.Int64Attribute{
-				Computed: true,
+				MarkdownDescription: "Unix timestamp (seconds) when the latest version of the agent was created.",
+				Computed:            true,
 			},
 			"version": schema.StringAttribute{
+				MarkdownDescription: "Foundry-assigned version identifier for the latest definition. " +
+					"Increments on each Update.",
 				Computed: true,
 			},
 			"metadata": schema.MapAttribute{
-				Optional:    true,
-				Computed:    true,
-				ElementType: types.StringType,
+				MarkdownDescription: "Arbitrary key/value labels stored alongside the agent. Up to 16 entries.",
+				Optional:            true,
+				Computed:            true,
+				ElementType:         types.StringType,
 			},
 			"kind": schema.StringAttribute{
+				MarkdownDescription: "Agent kind. One of `prompt` (LLM + tools, no container), " +
+					"`hosted` / `container_app` (you ship a container image), or `workflow` " +
+					"(experimental). The hosted-only fields are required when `kind` is " +
+					"`hosted` or `container_app`, ignored otherwise.",
 				Required: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("prompt", "hosted", "container_app", "workflow"),
 				},
 			},
 			"model": schema.StringAttribute{
+				MarkdownDescription: "Model deployment name (e.g. `gpt-4o-mini`). For prompt agents this is the " +
+					"underlying LLM; for hosted agents it's the runtime model your container talks to via the " +
+					"Foundry-managed identity.",
 				Required: true,
 			},
 			"instructions": schema.StringAttribute{
+				MarkdownDescription: "System prompt for the agent. Ignored for hosted agents — the container " +
+					"defines its own behavior.",
 				Optional: true,
 				Computed: true,
 			},
@@ -232,8 +254,15 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 				MarkdownDescription: "Foundry-managed Entra identity for a hosted-agent version. Computed. Use `client_id` / `principal_id` to grant runtime RBAC (e.g. `Azure AI User` on the Foundry account).",
 				Computed:            true,
 				Attributes: map[string]schema.Attribute{
-					"client_id":    schema.StringAttribute{Computed: true},
-					"principal_id": schema.StringAttribute{Computed: true},
+					"client_id": schema.StringAttribute{
+						MarkdownDescription: "Application (client) ID of the agent's managed identity.",
+						Computed:            true,
+					},
+					"principal_id": schema.StringAttribute{
+						MarkdownDescription: "Object (principal) ID of the agent's managed identity. " +
+							"Use this in role assignments.",
+						Computed: true,
+					},
 				},
 			},
 			"container_protocol_versions": schema.ListNestedAttribute{
@@ -241,8 +270,14 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:            true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
-						"protocol": schema.StringAttribute{Required: true},
-						"version":  schema.StringAttribute{Required: true},
+						"protocol": schema.StringAttribute{
+							MarkdownDescription: "`responses` or `a2a`.",
+							Required:            true,
+						},
+						"version": schema.StringAttribute{
+							MarkdownDescription: "Protocol version, e.g. `v1`.",
+							Required:            true,
+						},
 					},
 				},
 			},
@@ -262,10 +297,14 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 		},
 		Blocks: map[string]schema.Block{
 			"tools": schema.ListNestedBlock{
-				MarkdownDescription: "Tools enabled for the agent.",
+				MarkdownDescription: "Tools enabled for the agent. Order is preserved on the wire. " +
+					"Set the variant block (`code_interpreter`, `function`, `mcp`, ...) matching the `type`; " +
+					"the others are ignored.",
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{
 						"type": schema.StringAttribute{
+							MarkdownDescription: "Tool type. One of `file_search`, `code_interpreter`, `web_search`, " +
+								"`bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`.",
 							Required: true,
 							Validators: []validator.String{
 								stringvalidator.OneOf(
@@ -282,76 +321,159 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 							},
 						},
 						"vector_store_ids": schema.ListAttribute{
-							Optional:    true,
-							ElementType: types.StringType,
+							MarkdownDescription: "Vector store IDs to search. Used when `type = \"file_search\"`.",
+							Optional:            true,
+							ElementType:         types.StringType,
 						},
 						"max_num_results": schema.Int64Attribute{
+							MarkdownDescription: "Maximum search hits returned per query. Used when " +
+								"`type = \"file_search\"`. Defaults to the Foundry server-side default.",
 							Optional: true,
 						},
 						"code_interpreter": schema.SingleNestedAttribute{
-							Optional: true,
+							MarkdownDescription: "Sandboxed Python execution. Used when `type = \"code_interpreter\"`.",
+							Optional:            true,
 							Attributes: map[string]schema.Attribute{
 								"file_ids": schema.ListAttribute{
-									Optional:    true,
-									ElementType: types.StringType,
+									MarkdownDescription: "File IDs available to the code interpreter sandbox.",
+									Optional:            true,
+									ElementType:         types.StringType,
 								},
 							},
 						},
 						"function": schema.SingleNestedAttribute{
+							MarkdownDescription: "OpenAI-style function calling. Used when `type = \"function\"`. " +
+								"`parameters_json` is a JSON Schema describing the function's arguments.",
 							Optional: true,
 							Attributes: map[string]schema.Attribute{
-								"name":            schema.StringAttribute{Required: true},
-								"description":     schema.StringAttribute{Optional: true},
-								"parameters_json": schema.StringAttribute{Optional: true},
+								"name": schema.StringAttribute{
+									MarkdownDescription: "Function name the model will call.",
+									Required:            true,
+								},
+								"description": schema.StringAttribute{
+									MarkdownDescription: "Human-readable description shown to the model.",
+									Optional:            true,
+								},
+								"parameters_json": schema.StringAttribute{
+									MarkdownDescription: "JSON Schema (as a string) for the function's parameters. " +
+										"Use `jsonencode({...})` in HCL.",
+									Optional: true,
+								},
 							},
 						},
 						"openapi": schema.SingleNestedAttribute{
-							Optional: true,
+							MarkdownDescription: "OpenAPI spec inlined as a tool. Used when `type = \"openapi\"`.",
+							Optional:            true,
 							Attributes: map[string]schema.Attribute{
-								"name":        schema.StringAttribute{Required: true},
-								"description": schema.StringAttribute{Optional: true},
-								"spec_json":   schema.StringAttribute{Required: true},
-								"auth_type":   schema.StringAttribute{Optional: true},
+								"name": schema.StringAttribute{
+									MarkdownDescription: "Tool name surfaced to the model.",
+									Required:            true,
+								},
+								"description": schema.StringAttribute{
+									MarkdownDescription: "Human-readable description shown to the model.",
+									Optional:            true,
+								},
+								"spec_json": schema.StringAttribute{
+									MarkdownDescription: "OpenAPI 3.x spec serialized as a JSON string. " +
+										"Use `jsonencode({...})` or `file(\"spec.json\")` in HCL.",
+									Required: true,
+								},
+								"auth_type": schema.StringAttribute{
+									MarkdownDescription: "`anonymous` (default) or `connection`. When `connection`, " +
+										"Foundry uses the project connection bound to the API host.",
+									Optional: true,
+								},
 							},
 						},
 						"mcp": schema.SingleNestedAttribute{
-							Optional: true,
+							MarkdownDescription: "Model Context Protocol server. Used when `type = \"mcp\"`.",
+							Optional:            true,
 							Attributes: map[string]schema.Attribute{
-								"server_label":          schema.StringAttribute{Required: true},
-								"server_url":            schema.StringAttribute{Required: true},
-								"require_approval":      schema.StringAttribute{Optional: true},
-								"project_connection_id": schema.StringAttribute{Optional: true},
+								"server_label": schema.StringAttribute{
+									MarkdownDescription: "Display label for the MCP server in tool-call traces.",
+									Required:            true,
+								},
+								"server_url": schema.StringAttribute{
+									MarkdownDescription: "URL of the MCP server. Must be reachable from Foundry's egress.",
+									Required:            true,
+								},
+								"require_approval": schema.StringAttribute{
+									MarkdownDescription: "`always`, `never`, or omitted (Foundry default). Controls whether " +
+										"the user must approve tool invocations before they run.",
+									Optional: true,
+								},
+								"project_connection_id": schema.StringAttribute{
+									MarkdownDescription: "Project connection ID used to authenticate to the MCP server.",
+									Optional:            true,
+								},
 							},
 						},
 						"azure_ai_search": schema.SingleNestedAttribute{
+							MarkdownDescription: "Azure AI Search retrieval. Used when `type = \"azure_ai_search\"`. " +
+								"One or more `indexes` are queried per request.",
 							Optional: true,
 							Attributes: map[string]schema.Attribute{
 								"indexes": schema.ListNestedAttribute{
-									Required: true,
+									MarkdownDescription: "Indexes to query.",
+									Required:            true,
 									NestedObject: schema.NestedAttributeObject{
 										Attributes: map[string]schema.Attribute{
-											"project_connection_id": schema.StringAttribute{Required: true},
-											"index_name":            schema.StringAttribute{Required: true},
-											"query_type":            schema.StringAttribute{Optional: true},
-											"top_k":                 schema.Int64Attribute{Optional: true},
+											"project_connection_id": schema.StringAttribute{
+												MarkdownDescription: "Project connection ID for the Azure AI Search account.",
+												Required:            true,
+											},
+											"index_name": schema.StringAttribute{
+												MarkdownDescription: "Name of the index within the search account.",
+												Required:            true,
+											},
+											"query_type": schema.StringAttribute{
+												MarkdownDescription: "`simple`, `semantic`, `vector`, `vector_simple_hybrid`, or " +
+													"`vector_semantic_hybrid`. Defaults to Foundry's preference.",
+												Optional: true,
+											},
+											"top_k": schema.Int64Attribute{
+												MarkdownDescription: "Maximum hits returned per query. Defaults to the " +
+													"server-side default.",
+												Optional: true,
+											},
 										},
 									},
 								},
 							},
 						},
 						"bing_grounding": schema.SingleNestedAttribute{
+							MarkdownDescription: "Bing Search v7 grounding via a project connection. " +
+								"Used when `type = \"bing_grounding\"`. For the managed Foundry-hosted variant " +
+								"that needs no connection, use `type = \"web_search\"`.",
 							Optional: true,
 							Attributes: map[string]schema.Attribute{
-								"connection_id": schema.StringAttribute{Required: true},
+								"connection_id": schema.StringAttribute{
+									MarkdownDescription: "Project connection ID bound to the Bing Search resource.",
+									Required:            true,
+								},
 							},
 						},
 						"memory_search": schema.SingleNestedAttribute{
-							MarkdownDescription: "Attach a Foundry Memory store (preview). Wire type is `memory_search_preview`; provider accepts the shorter `memory_search` for forward-compat.",
-							Optional:            true,
+							MarkdownDescription: "Attach a Foundry Memory store (preview). Used when " +
+								"`type = \"memory_search\"`. The wire spelling is `memory_search_preview` while " +
+								"the feature is in preview; this provider accepts the shorter `memory_search` and " +
+								"translates at the boundary so consumer HCL stays stable across the GA cut-over.",
+							Optional: true,
 							Attributes: map[string]schema.Attribute{
-								"memory_store_name": schema.StringAttribute{Required: true},
-								"scope":             schema.StringAttribute{Optional: true},
-								"update_delay":      schema.Int64Attribute{Optional: true},
+								"memory_store_name": schema.StringAttribute{
+									MarkdownDescription: "Name of the `azurefoundry_memory_store_v2` to attach.",
+									Required:            true,
+								},
+								"scope": schema.StringAttribute{
+									MarkdownDescription: "Memory scope expression. Use `\"{{$userId}}\"` to resolve from " +
+										"the `x-memory-user-id` header or the caller's Entra identity.",
+									Optional: true,
+								},
+								"update_delay": schema.Int64Attribute{
+									MarkdownDescription: "Seconds of inactivity before extracted memories are written " +
+										"back to the store. Defaults to 300.",
+									Optional: true,
+								},
 							},
 						},
 					},

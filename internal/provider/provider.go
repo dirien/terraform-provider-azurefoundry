@@ -53,7 +53,17 @@ func (p *AzureFoundryProvider) Metadata(_ context.Context, _ provider.MetadataRe
 
 func (p *AzureFoundryProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "The azurefoundry provider manages resources in Azure AI Foundry.",
+		MarkdownDescription: "Manages resources in [Azure AI Foundry](https://learn.microsoft.com/azure/ai-foundry/) — " +
+			"agents, files, vector stores, and memory stores.\n\n" +
+			"## Authentication\n\n" +
+			"The provider tries authentication methods in this order:\n\n" +
+			"1. **API key** — `api_key` attribute or `AZURE_AI_FOUNDRY_API_KEY`\n" +
+			"2. **OIDC client assertion** — `tenant_id` + `client_id` + `oidc_token` (or `AZURE_OIDC_TOKEN` / `ARM_OIDC_TOKEN`). " +
+			"Used by Pulumi ESC and federated GitHub Actions OIDC.\n" +
+			"3. **Service principal with secret** — `tenant_id` + `client_id` + `client_secret`\n" +
+			"4. **Azure CLI** — set `use_azure_cli = true` after `az login`\n" +
+			"5. **Default Azure credential chain** — managed identity, workload identity, etc.\n\n" +
+			"All credentials are marked `Sensitive` so they're redacted from `terraform plan` output.",
 		Attributes: map[string]schema.Attribute{
 			"project_endpoint": schema.StringAttribute{
 				MarkdownDescription: "The Azure AI Foundry project endpoint. " +
