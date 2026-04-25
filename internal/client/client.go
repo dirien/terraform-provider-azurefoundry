@@ -12,6 +12,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -39,6 +41,13 @@ type FoundryClient struct {
 	credential      azcore.TokenCredential
 	apiKey          string
 	httpClient      *http.Client
+
+	// projectReady is set the first time a probe GET on the project's
+	// data plane returns 2xx. Subsequent data-plane Creates short-circuit
+	// the readiness wait so only the first resource per provider session
+	// pays the propagation cost.
+	projectReady   atomic.Bool
+	projectReadyMu sync.Mutex
 }
 
 func NewFoundryClientWithCredential(projectEndpoint string, credential azcore.TokenCredential) *FoundryClient {
@@ -56,6 +65,73 @@ func NewFoundryClientWithAPIKey(projectEndpoint string, apiKey string) *FoundryC
 		authMode:        AuthModeAPIKey,
 		apiKey:          apiKey,
 		httpClient:      &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// WaitForProjectReady polls the Foundry data-plane endpoint until a cheap
+// GET on /agents returns 2xx. This covers two intertwined startup races:
+//
+//  1. ARM finishes creating the project resource before the data-plane
+//     project routing is ready (Foundry returns HTTP 404
+//     "Project not found" until it is).
+//  2. RBAC role assignments take 10–30 minutes to propagate to Foundry's
+//     access-check cache. While they propagate, the data plane returns
+//     401/403 even though the principal does have the role server-side.
+//
+// First-Create-per-session pays the wait; subsequent Creates short-circuit
+// via the cached projectReady flag.
+//
+// timeout caps the total wait. Pass 0 to skip waiting (assume ready).
+// Default suggestion for callers: 30 minutes.
+func (c *FoundryClient) WaitForProjectReady(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		return nil
+	}
+	if c.projectReady.Load() {
+		return nil
+	}
+	c.projectReadyMu.Lock()
+	defer c.projectReadyMu.Unlock()
+	if c.projectReady.Load() {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/agents?api-version=v1", c.ProjectEndpoint)
+	deadline := time.Now().Add(timeout)
+	backoff := 5 * time.Second
+
+	for {
+		req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("building project-readiness probe: %w", err)
+		}
+		resp, doErr := c.httpClient.Do(req)
+		var status int
+		if doErr == nil {
+			status = resp.StatusCode
+			resp.Body.Close()
+			if status >= 200 && status < 300 {
+				c.projectReady.Store(true)
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if doErr != nil {
+				return fmt.Errorf("project at %s not reachable within %s: %w", c.ProjectEndpoint, timeout, doErr)
+			}
+			return fmt.Errorf("project at %s not reachable within %s: last status HTTP %d", c.ProjectEndpoint, timeout, status)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 60*time.Second {
+			backoff *= 2
+			if backoff > 60*time.Second {
+				backoff = 60 * time.Second
+			}
+		}
 	}
 }
 

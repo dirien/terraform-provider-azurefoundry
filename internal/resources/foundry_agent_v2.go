@@ -381,6 +381,14 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 
 	tflog.Debug(ctx, "Creating Foundry agent", map[string]interface{}{"name": apiReq.Name, "model": apiReq.Definition.Model})
 
+	// Block until the project's data plane is reachable (project routing +
+	// RBAC propagation). First Create per session pays the cost; the rest
+	// short-circuit via a cached flag.
+	if err := r.client.WaitForProjectReady(ctx, 30*time.Minute); err != nil {
+		resp.Diagnostics.AddError("Foundry project not reachable", err.Error())
+		return
+	}
+
 	// Pre-flight GET: shrink the orphan-creation race. If a resource with
 	// this name already exists in the data plane, fail with the import
 	// hint *before* we POST. Without this, a Create that's about to 409

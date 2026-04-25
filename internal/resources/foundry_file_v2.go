@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
@@ -141,6 +142,11 @@ func (r *FoundryFileV2Resource) Create(ctx context.Context, req resource.CreateR
 	purpose := client.FilePurposeAssistants
 	if !plan.Purpose.IsNull() && !plan.Purpose.IsUnknown() {
 		purpose = client.FilePurpose(plan.Purpose.ValueString())
+	}
+
+	if err := r.client.WaitForProjectReady(ctx, 30*time.Minute); err != nil {
+		resp.Diagnostics.AddError("Foundry project not reachable", err.Error())
+		return
 	}
 
 	tflog.Debug(ctx, "Uploading file to Foundry", map[string]interface{}{"source": source})

@@ -6,6 +6,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
@@ -186,6 +187,11 @@ func (r *FoundryVectorStoreV2Resource) Create(ctx context.Context, req resource.
 	apiReq, diags := modelToCreateVectorStoreV2Request(ctx, plan)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if err := r.client.WaitForProjectReady(ctx, 30*time.Minute); err != nil {
+		resp.Diagnostics.AddError("Foundry project not reachable", err.Error())
 		return
 	}
 

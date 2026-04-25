@@ -6,6 +6,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
@@ -162,6 +163,11 @@ func (r *FoundryMemoryStoreV2Resource) Create(ctx context.Context, req resource.
 	}
 
 	tflog.Debug(ctx, "Creating Foundry memory store", map[string]interface{}{"name": apiReq.Name})
+
+	if err := r.client.WaitForProjectReady(ctx, 30*time.Minute); err != nil {
+		resp.Diagnostics.AddError("Foundry project not reachable", err.Error())
+		return
+	}
 
 	// Pre-flight GET: see foundry_agent_v2.go Create for rationale.
 	if existing, getErr := r.client.GetMemoryStore(ctx, apiReq.Name); getErr == nil && existing != nil {
