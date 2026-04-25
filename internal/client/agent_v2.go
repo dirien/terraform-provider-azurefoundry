@@ -132,6 +132,11 @@ type FunctionToolV2 struct {
 }
 
 // OpenAPIToolV2 — inline OpenAPI spec.
+//
+// Headers is an outer-level field on the tool envelope (siblings: type,
+// openapi). Foundry routes it the same way it does for MCP — sent on
+// every outbound HTTP call to the tool. Useful for upstream APIs that
+// gate on a custom header outside the OpenAPI spec's `securitySchemes`.
 type OpenAPIAuth struct {
 	Type string `json:"type"` // anonymous | connection
 }
@@ -144,8 +149,9 @@ type OpenAPIConfig struct {
 }
 
 type OpenAPIToolV2 struct {
-	Type    string        `json:"type"` // "openapi"
-	OpenAPI OpenAPIConfig `json:"openapi"`
+	Type    string            `json:"type"` // "openapi"
+	OpenAPI OpenAPIConfig     `json:"openapi"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // MCPToolV2 — Model Context Protocol server.

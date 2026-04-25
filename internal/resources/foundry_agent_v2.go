@@ -127,6 +127,7 @@ var openapiAttrTypes = map[string]attr.Type{
 	"description": types.StringType,
 	"spec_json":   types.StringType,
 	"auth_type":   types.StringType,
+	"headers":     types.MapType{ElemType: types.StringType},
 }
 
 var mcpAttrTypes = map[string]attr.Type{
@@ -407,6 +408,14 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 										"Foundry uses the project connection bound to the API host.",
 									Optional: true,
 								},
+								"headers": schema.MapAttribute{
+									MarkdownDescription: "Optional HTTP headers Foundry sends on every outbound call to the API. " +
+										"Useful for upstreams that gate on a custom header outside the spec's `securitySchemes` " +
+										"(legacy APIs, dev/test stubs). Marked sensitive — values are redacted from plan / state output.",
+									Optional:    true,
+									Sensitive:   true,
+									ElementType: types.StringType,
+								},
 							},
 						},
 						"mcp": schema.SingleNestedAttribute{
@@ -441,9 +450,13 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 								},
 								"headers": schema.MapAttribute{
 									MarkdownDescription: "Optional HTTP headers Foundry sends on every MCP request. " +
-										"Primarily used for per-request auth tokens like " +
-										"`x-ms-query-source-authorization` against remote-SharePoint knowledge sources.",
+										"Common uses: `x-ms-query-source-authorization` for remote-SharePoint " +
+										"knowledge sources, `Foundry-Features: Toolboxes=V1Preview` when " +
+										"consuming a toolbox endpoint, or per-tool bearer tokens for upstreams " +
+										"outside the project-connection auth flow. Marked sensitive — values are " +
+										"redacted from plan / state output.",
 									Optional:    true,
+									Sensitive:   true,
 									ElementType: types.StringType,
 								},
 							},
@@ -477,8 +490,9 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 									Optional:            true,
 								},
 								"headers": schema.MapAttribute{
-									MarkdownDescription: "Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement.",
+									MarkdownDescription: "Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement. Marked sensitive — values are redacted from plan / state output.",
 									Optional:            true,
+									Sensitive:           true,
 									ElementType:         types.StringType,
 								},
 							},
@@ -1129,7 +1143,7 @@ func extractFunctionTool(_ context.Context, t *toolModelV2) (any, diag.Diagnosti
 	return tool, diags
 }
 
-func extractOpenAPITool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+func extractOpenAPITool(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics) {
 	tool := client.OpenAPIToolV2{Type: "openapi"}
 	if t.OpenAPI.IsNull() || t.OpenAPI.IsUnknown() {
 		return tool, nil
@@ -1148,6 +1162,10 @@ func extractOpenAPITool(_ context.Context, t *toolModelV2) (any, diag.Diagnostic
 		authType = "anonymous"
 	}
 	tool.OpenAPI.Auth = client.OpenAPIAuth{Type: authType}
+
+	if v, ok := attrs["headers"].(types.Map); ok {
+		tool.Headers = extractStringMap(ctx, v)
+	}
 	return tool, diags
 }
 
@@ -1407,12 +1425,20 @@ func wireFunctionTool(toolMap map[string]any, values map[string]attr.Value) diag
 func wireOpenAPITool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
 	oa := asMap(toolMap["openapi"])
 	authType := stringFromMap(asMap(oa["auth"]), "type")
-	obj, diags := types.ObjectValue(openapiAttrTypes, map[string]attr.Value{
+
+	// headers lives on the outer tool envelope, sibling to "openapi" — same
+	// as the mcp variant. Foundry positions it that way so the same plumbing
+	// applies to both.
+	headers, diags := stringMapFromAny(toolMap["headers"])
+
+	obj, d := types.ObjectValue(openapiAttrTypes, map[string]attr.Value{
 		"name":        types.StringValue(stringFromMap(oa, "name")),
 		"description": types.StringValue(stringFromMap(oa, "description")),
 		"spec_json":   types.StringValue(jsonStringFromMap(oa, "spec")),
 		"auth_type":   types.StringValue(authType),
+		"headers":     headers,
 	})
+	diags.Append(d...)
 	values["openapi"] = obj
 	return diags
 }

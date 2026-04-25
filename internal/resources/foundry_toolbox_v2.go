@@ -225,6 +225,12 @@ func toolboxToolsNestedBlock() schema.NestedBlockObject {
 					"description": schema.StringAttribute{MarkdownDescription: "Human-readable description shown to the model.", Optional: true},
 					"spec_json":   schema.StringAttribute{MarkdownDescription: "OpenAPI 3.x spec serialized as a JSON string.", Required: true},
 					"auth_type":   schema.StringAttribute{MarkdownDescription: "`anonymous` (default) or `connection`.", Optional: true},
+					"headers": schema.MapAttribute{
+						MarkdownDescription: "Optional HTTP headers Foundry sends on every outbound call. Useful for upstreams that gate on a custom header outside the spec's `securitySchemes`. Marked sensitive — values are redacted from plan / state output.",
+						Optional:            true,
+						Sensitive:           true,
+						ElementType:         types.StringType,
+					},
 				},
 			},
 			"mcp": schema.SingleNestedAttribute{
@@ -235,6 +241,17 @@ func toolboxToolsNestedBlock() schema.NestedBlockObject {
 					"server_url":            schema.StringAttribute{MarkdownDescription: "URL of the MCP server. Must be reachable from Foundry's egress.", Required: true},
 					"require_approval":      schema.StringAttribute{MarkdownDescription: "`always`, `never`, or omitted (Foundry default).", Optional: true},
 					"project_connection_id": schema.StringAttribute{MarkdownDescription: "Project connection ID used to authenticate to the MCP server.", Optional: true},
+					"allowed_tools": schema.ListAttribute{
+						MarkdownDescription: "Optional allow-list of MCP tool names. Empty means all advertised tools are available. Useful when fronting a server that exposes more than the toolbox should publish — e.g. `[\"knowledge_base_retrieve\"]` for a Foundry IQ KB.",
+						Optional:            true,
+						ElementType:         types.StringType,
+					},
+					"headers": schema.MapAttribute{
+						MarkdownDescription: "Optional HTTP headers Foundry sends on every MCP request. Common uses: `x-ms-query-source-authorization` for remote-SharePoint knowledge sources nested behind this toolbox tool, or per-tool bearer tokens for upstreams outside the project-connection auth flow. Marked sensitive — values are redacted from plan / state output.",
+						Optional:            true,
+						Sensitive:           true,
+						ElementType:         types.StringType,
+					},
 				},
 			},
 			"azure_ai_search": schema.SingleNestedAttribute{

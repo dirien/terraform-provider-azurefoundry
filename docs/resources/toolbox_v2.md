@@ -246,6 +246,8 @@ Required:
 
 Optional:
 
+- `allowed_tools` (List of String) Optional allow-list of MCP tool names. Empty means all advertised tools are available. Useful when fronting a server that exposes more than the toolbox should publish — e.g. `["knowledge_base_retrieve"]` for a Foundry IQ KB.
+- `headers` (Map of String, Sensitive) Optional HTTP headers Foundry sends on every MCP request. Common uses: `x-ms-query-source-authorization` for remote-SharePoint knowledge sources nested behind this toolbox tool, or per-tool bearer tokens for upstreams outside the project-connection auth flow. Marked sensitive — values are redacted from plan / state output.
 - `project_connection_id` (String) Project connection ID used to authenticate to the MCP server.
 - `require_approval` (String) `always`, `never`, or omitted (Foundry default).
 
@@ -275,3 +277,4 @@ Optional:
 
 - `auth_type` (String) `anonymous` (default) or `connection`.
 - `description` (String) Human-readable description shown to the model.
+- `headers` (Map of String, Sensitive) Optional HTTP headers Foundry sends on every outbound call. Useful for upstreams that gate on a custom header outside the spec's `securitySchemes`. Marked sensitive — values are redacted from plan / state output.

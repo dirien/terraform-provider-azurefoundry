@@ -196,7 +196,7 @@ Required:
 
 Optional:
 
-- `headers` (Map of String) Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement.
+- `headers` (Map of String, Sensitive) Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement. Marked sensitive — values are redacted from plan / state output.
 - `require_approval` (String) `always`, `never`, or omitted (Foundry default). Defaults to `"never"` for the typed variant — KB lookups are read-only.
 - `server_label` (String) Display label shown in tool-call traces. Defaults to `"knowledge-base"`.
 
@@ -212,7 +212,7 @@ Required:
 Optional:
 
 - `allowed_tools` (List of String) Optional allow-list of MCP tool names the model may invoke. Empty means all advertised tools are available. Set this to scope down a server that exposes more than the agent should use; required for Foundry IQ knowledge bases (`["knowledge_base_retrieve"]`) — though prefer the typed `knowledge_base` variant for that case.
-- `headers` (Map of String) Optional HTTP headers Foundry sends on every MCP request. Primarily used for per-request auth tokens like `x-ms-query-source-authorization` against remote-SharePoint knowledge sources.
+- `headers` (Map of String, Sensitive) Optional HTTP headers Foundry sends on every MCP request. Common uses: `x-ms-query-source-authorization` for remote-SharePoint knowledge sources, `Foundry-Features: Toolboxes=V1Preview` when consuming a toolbox endpoint, or per-tool bearer tokens for upstreams outside the project-connection auth flow. Marked sensitive — values are redacted from plan / state output.
 - `project_connection_id` (String) Project connection ID used to authenticate to the MCP server.
 - `require_approval` (String) `always`, `never`, or omitted (Foundry default). Controls whether the user must approve tool invocations before they run.
 
@@ -242,6 +242,7 @@ Optional:
 
 - `auth_type` (String) `anonymous` (default) or `connection`. When `connection`, Foundry uses the project connection bound to the API host.
 - `description` (String) Human-readable description shown to the model.
+- `headers` (Map of String, Sensitive) Optional HTTP headers Foundry sends on every outbound call to the API. Useful for upstreams that gate on a custom header outside the spec's `securitySchemes` (legacy APIs, dev/test stubs). Marked sensitive — values are redacted from plan / state output.
 
 
 
