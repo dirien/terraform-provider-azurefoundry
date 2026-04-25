@@ -83,25 +83,35 @@ func (c *FoundryClient) projectIndexURL(name, version string) string {
 		c.ProjectEndpoint, url.PathEscape(name), url.PathEscape(version), ProjectIndexAPIVersion)
 }
 
-// CreateOrUpdateProjectIndex upserts a single (name, version) pair. The
-// underlying HTTP method is PUT with content-type application/merge-patch+json
-// per the SDK contract — every call replaces the prior body wholesale,
-// matching how Terraform Update wants to think about it.
+// CreateOrUpdateProjectIndex upserts a single (name, version) pair.
+//
+// Wire shape: HTTP **PATCH** with Content-Type
+// `application/merge-patch+json` (RFC 7396). The Python SDK calls this
+// `create_or_update` which sounds like PUT semantics, but the underlying
+// transport is PATCH — verified against
+// `azure-sdk-for-python/.../operations/_operations.py:795`
+// (`build_indexes_create_or_update_request` → `HttpRequest(method="PATCH", …)`).
+// Every call replaces the prior body wholesale, matching how Terraform
+// Update wants to think about it.
+//
+// v0.8.2 issued PUT against the same URL and got HTTP 404 from the live
+// service in swedencentral — see issue #12. The fix is the verb, nothing
+// else: URL template, api-version, content-type were all already correct.
 func (c *FoundryClient) CreateOrUpdateProjectIndex(ctx context.Context, idx ProjectIndex) (*ProjectIndex, error) {
 	if idx.Version == "" {
 		idx.Version = ProjectIndexDefaultVersion
 	}
 	target := c.projectIndexURL(idx.Name, idx.Version)
-	httpReq, err := c.newRequest(ctx, http.MethodPut, target, idx)
+	httpReq, err := c.newRequest(ctx, http.MethodPatch, target, idx)
 	if err != nil {
 		return nil, err
 	}
-	// merge-patch+json signals a partial-update upsert — required by the
-	// service per the Python SDK's content-type default.
+	// merge-patch+json signals an RFC 7396 partial-update upsert —
+	// required by the service per the Python SDK's content-type default.
 	httpReq.Header.Set("Content-Type", "application/merge-patch+json")
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("project index PUT HTTP error (%s): %w", target, err)
+		return nil, fmt.Errorf("project index PATCH HTTP error (%s): %w", target, err)
 	}
 	defer closeBody(resp)
 	if err := checkResponseError(resp); err != nil {
