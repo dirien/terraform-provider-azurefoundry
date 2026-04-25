@@ -14,7 +14,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,23 +77,46 @@ func NewFoundryClientWithAPIKey(projectEndpoint, apiKey string) *FoundryClient {
 	}
 }
 
-// WaitForProjectReady polls the Foundry data-plane endpoint until a cheap
-// GET on /files returns 2xx. This covers two intertwined startup races:
+// Project-readiness probe backoff. Tunable via waitForProjectReadyOnce so
+// tests can run with millisecond cadence.
+const (
+	projectReadyInitialBackoff = 5 * time.Second
+	projectReadyMaxBackoff     = 60 * time.Second
+)
+
+// projectNotFoundMarker is the body substring Foundry returns from APIM when
+// the project's data-plane routing is still cold. Crucially it's also
+// returned for **POST** while GET routes are already up, which is why
+// WaitForProjectReady uses a write-style probe.
+const projectNotFoundMarker = "Project not found"
+
+// WaitForProjectReady polls the Foundry data-plane endpoint until a write-
+// style probe (POST /files with a malformed-but-parseable multipart body)
+// stops returning 404 "Project not found". This covers three intertwined
+// startup states that all looked alike to the previous GET-based probe:
 //
 //  1. ARM finishes creating the project resource before the data-plane
-//     project routing is ready (Foundry returns HTTP 404
-//     "Project not found" until it is).
+//     project routing is ready (Foundry returns HTTP 404 "Project not
+//     found" until it is).
 //  2. RBAC role assignments take 10–30 minutes to propagate to Foundry's
 //     access-check cache. While they propagate, the data plane returns
 //     401/403 even though the principal does have the role server-side.
+//  3. Most subtle: GET routes warm up before POST routes. A GET probe on
+//     /files (or /vector_stores, /assistants) can return 200 while the
+//     very next POST against the same path returns 404 "Project not
+//     found". Documented live against foundry-talk-dev in 2026-04 — see
+//     issue #1.
 //
-// /files on the v1 surface (api-version=APIVersion) is intentional: it's
-// universally available on every Foundry project regardless of whether the
-// underlying account has an Agents capability host. Probing /agents on the
-// v2 surface returns a permanent 404 ("Project not found") for prompt-only
-// projects without an AccountCapabilityHost of kind Agents — which would
-// hang Create on those projects until the timeout fires even though the
-// data plane is fully up.
+// We probe with POST /files because that's the exact endpoint
+// FoundryFileV2Resource.Create hits, so a positive readiness signal means
+// the path the next Create will take is actually warm. The body is an
+// empty multipart envelope: a warmed file service rejects it with a
+// validation 4xx (no "purpose" field), a cold data plane returns the
+// "Project not found" 404 before the request reaches the file service.
+//
+// Bail-out condition: response body does NOT contain the
+// projectNotFoundMarker substring AND status is not retryable
+// (401/403 = RBAC propagation, 5xx/network = transient).
 //
 // First-Create-per-session pays the wait; subsequent Creates short-circuit
 // via the cached projectReady flag.
@@ -111,43 +136,96 @@ func (c *FoundryClient) WaitForProjectReady(ctx context.Context, timeout time.Du
 		return nil
 	}
 
-	url := c.ProjectEndpoint + "/files?api-version=" + APIVersion
+	if err := c.waitForProjectReadyOnce(ctx, timeout, projectReadyInitialBackoff, projectReadyMaxBackoff); err != nil {
+		return err
+	}
+	c.projectReady.Store(true)
+	return nil
+}
+
+// waitForProjectReadyOnce runs the probe loop without touching the cached
+// projectReady flag or the readiness mutex. Split out so tests can inject
+// millisecond backoffs.
+func (c *FoundryClient) waitForProjectReadyOnce(ctx context.Context, timeout, initialBackoff, maxBackoff time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	backoff := 5 * time.Second
+	backoff := initialBackoff
+	var lastStatus int
+	var lastBody string
+	var lastErr error
 
 	for {
-		req, err := c.newRequest(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return fmt.Errorf("building project-readiness probe: %w", err)
-		}
-		resp, doErr := c.httpClient.Do(req)
-		var status int
-		if doErr == nil {
-			status = resp.StatusCode
-			closeBody(resp)
-			if status >= 200 && status < 300 {
-				c.projectReady.Store(true)
-				return nil
-			}
+		ready, status, body, err := c.probeProjectWriteReady(ctx)
+		lastStatus, lastBody, lastErr = status, body, err
+		if ready {
+			return nil
 		}
 		if time.Now().After(deadline) {
-			if doErr != nil {
-				return fmt.Errorf("project at %s not reachable within %s: %w", c.ProjectEndpoint, timeout, doErr)
+			if lastErr != nil {
+				return fmt.Errorf("project at %s not write-reachable within %s: %w", c.ProjectEndpoint, timeout, lastErr)
 			}
-			return fmt.Errorf("project at %s not reachable within %s: last status HTTP %d", c.ProjectEndpoint, timeout, status)
+			return fmt.Errorf("project at %s not write-reachable within %s: last status HTTP %d, body %q",
+				c.ProjectEndpoint, timeout, lastStatus, truncate(lastBody, 200))
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
-		if backoff < 60*time.Second {
+		if backoff < maxBackoff {
 			backoff *= 2
-			if backoff > 60*time.Second {
-				backoff = 60 * time.Second
+			if backoff > maxBackoff {
+				backoff = maxBackoff
 			}
 		}
 	}
+}
+
+// probeProjectWriteReady issues one POST /files probe with a malformed
+// multipart body. Returns ready=true when the response indicates the data
+// plane reached the file service (any non-retryable response). Returns
+// ready=false on transport errors, 5xx, 401/403 (RBAC propagation), or
+// 404 with the "Project not found" body marker.
+func (c *FoundryClient) probeProjectWriteReady(ctx context.Context) (ready bool, status int, body string, err error) {
+	url := c.ProjectEndpoint + "/files?api-version=" + APIVersion
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if cerr := mw.Close(); cerr != nil {
+		return false, 0, "", fmt.Errorf("closing probe multipart writer: %w", cerr)
+	}
+
+	req, err := c.newRequestRaw(ctx, http.MethodPost, url, &buf, mw.FormDataContentType())
+	if err != nil {
+		return false, 0, "", fmt.Errorf("building project-readiness probe: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, 0, "", err
+	}
+	defer closeBody(resp)
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body = string(bodyBytes)
+	status = resp.StatusCode
+
+	switch {
+	case status >= 500 && status < 600:
+		return false, status, body, nil
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return false, status, body, nil
+	case status == http.StatusNotFound && strings.Contains(body, projectNotFoundMarker):
+		return false, status, body, nil
+	default:
+		return true, status, body, nil
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
