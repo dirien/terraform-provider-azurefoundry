@@ -19,6 +19,7 @@ Backend services (Go)
 | `client/file.go` | File CRUD shared between v1/v2 generations. |
 | `client/vector_store.go` | Vector store CRUD shared between v1/v2 generations + `WaitForVectorStore`. |
 | `client/memory_store_v2.go` | Memory store CRUD (preview, separate `MemoryStoreAPIVersion`). |
+| `client/toolbox_v2.go` | Toolbox CRUD (preview, `Toolboxes=V1Preview`); versioned via POST `/toolboxes/{name}/versions` + PATCH default_version. |
 | `client/client_test.go` | First-class testing pattern: `roundTripperFunc` + injected backoff for `WaitForProjectReady`. |
 | `resources/foundry_agent.go` | `azurefoundry_agent` (classic Assistants resource). |
 | `resources/foundry_agent_v2.go` | `azurefoundry_agent_v2` — biggest file; polymorphic tools dispatch via `toolExtractors` / `toolWirers` maps. |
@@ -27,6 +28,7 @@ Backend services (Go)
 | `resources/foundry_vector_store.go` | `azurefoundry_vector_store`. |
 | `resources/foundry_vector_store_v2.go` | `azurefoundry_vector_store_v2`. |
 | `resources/foundry_memory_store_v2.go` | `azurefoundry_memory_store_v2` (preview). |
+| `resources/foundry_toolbox_v2.go` | `azurefoundry_toolbox_v2` (preview). Reuses `toolExtractors`/`toolWirers` from agent_v2 for tool variant dispatch. Versions are append-only — Update posts a new version + optionally promotes it. |
 
 ## Golden Samples (follow these patterns)
 | Pattern | Reference |
