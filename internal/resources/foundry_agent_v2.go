@@ -366,6 +366,28 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 
 	tflog.Debug(ctx, "Creating Foundry agent", map[string]interface{}{"name": apiReq.Name, "model": apiReq.Definition.Model})
 
+	// Pre-flight GET: shrink the orphan-creation race. If a resource with
+	// this name already exists in the data plane, fail with the import
+	// hint *before* we POST. Without this, a Create that's about to 409
+	// would still return that 409 — but the orphan was created by an
+	// earlier run, not by us. With this, we can also catch the case where
+	// state was lost (e.g. backend wipe) and the data-plane resource is
+	// still here. The remaining race window — between this GET and the
+	// POST below — is on the order of one HTTP roundtrip, and a true
+	// concurrent create from another caller would still surface the same
+	// import-hint error (caught below by isConflict).
+	if existing, getErr := r.client.GetAgentV2(ctx, apiReq.Name); getErr == nil && existing != nil {
+		summary, detail := alreadyExistsError(
+			"agent", apiReq.Name,
+			"azurefoundry_agent_v2", "azurefoundry:index:AgentV2",
+		)
+		resp.Diagnostics.AddError(summary, detail)
+		return
+	} else if getErr != nil && !isNotFound(getErr) {
+		resp.Diagnostics.AddError("Pre-flight existence check failed", getErr.Error())
+		return
+	}
+
 	agentResp, err := r.client.CreateAgentV2(ctx, apiReq)
 	if err != nil {
 		if isConflict(err) {

@@ -163,6 +163,19 @@ func (r *FoundryMemoryStoreV2Resource) Create(ctx context.Context, req resource.
 
 	tflog.Debug(ctx, "Creating Foundry memory store", map[string]interface{}{"name": apiReq.Name})
 
+	// Pre-flight GET: see foundry_agent_v2.go Create for rationale.
+	if existing, getErr := r.client.GetMemoryStore(ctx, apiReq.Name); getErr == nil && existing != nil {
+		summary, detail := alreadyExistsError(
+			"memory store", apiReq.Name,
+			"azurefoundry_memory_store_v2", "azurefoundry:index:MemoryStoreV2",
+		)
+		resp.Diagnostics.AddError(summary, detail)
+		return
+	} else if getErr != nil && !isNotFound(getErr) {
+		resp.Diagnostics.AddError("Pre-flight existence check failed", getErr.Error())
+		return
+	}
+
 	msResp, err := r.client.CreateMemoryStore(ctx, apiReq)
 	if err != nil {
 		if isConflict(err) {
