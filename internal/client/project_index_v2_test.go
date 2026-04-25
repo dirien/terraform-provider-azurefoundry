@@ -16,8 +16,11 @@ func TestCreateOrUpdateProjectIndex_RoundTripsAzureSearchBody(t *testing.T) {
 	t.Parallel()
 
 	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodPut {
-			t.Errorf("expected PUT, got %s", r.Method)
+		// PATCH, not PUT — `create_or_update` in the SDK is RFC 7396 merge-
+		// patch transport. v0.8.2 used PUT and got 404 from the live
+		// service (issue #12); the URL template stayed correct.
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
 		}
 		if !strings.HasSuffix(r.URL.Path, "/indexes/fraud-policies-index/versions/1") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
