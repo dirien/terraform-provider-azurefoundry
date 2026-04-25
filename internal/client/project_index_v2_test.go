@@ -49,7 +49,7 @@ func TestCreateOrUpdateProjectIndex_RoundTripsAzureSearchBody(t *testing.T) {
 			t.Errorf("expected version=1, got %q", payload.Version)
 		}
 
-		body := `{"name":"fraud-policies-index","version":"1","type":"AzureSearch","id":"idx_abc","connection_name":"search-conn","index_name":"fraud-policies-ks-index"}`
+		body := `{"name":"fraud-policies-index","version":"1","type":"AzureSearch","id":"idx_abc","connectionName":"search-conn","indexName":"fraud-policies-ks-index"}`
 		return newProbeResponse(http.StatusOK, body), nil
 	})
 
@@ -126,6 +126,67 @@ func TestDeleteProjectIndex_NoBodyOnSuccess(t *testing.T) {
 	}
 }
 
+// TestCreateOrUpdateProjectIndex_BodyIsFlatCamelCase pins the wire shape
+// against issue #14. Foundry's PATCH handler validates the flat envelope:
+// it expects connectionName / indexName / fieldMapping at the top level
+// alongside type, NOT nested under an azureSearch sub-object NOR using
+// snake_case keys. v0.8.2 / v0.8.3 used snake_case (connection_name /
+// index_name / field_mapping) and got HTTP 400 "ConnectionName field is
+// required" because Foundry didn't recognize the keys.
+//
+// The test asserts the raw bytes — not just a struct round-trip — so a
+// future tag drift back to snake_case fails loudly.
+func TestCreateOrUpdateProjectIndex_BodyIsFlatCamelCase(t *testing.T) {
+	t.Parallel()
+
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		buf := make([]byte, r.ContentLength)
+		if _, err := r.Body.Read(buf); err != nil && err.Error() != "EOF" {
+			t.Fatalf("reading body: %v", err)
+		}
+		raw := string(buf)
+
+		// Required keys live at the TOP level alongside type, in camelCase.
+		mustContain := []string{
+			`"type":"AzureSearch"`,
+			`"connectionName":"search-conn"`,
+			`"indexName":"fraud-policies-ks-index"`,
+		}
+		for _, want := range mustContain {
+			if !strings.Contains(raw, want) {
+				t.Errorf("expected body to contain %q, got %s", want, raw)
+			}
+		}
+
+		// Specific anti-patterns from the v0.8.2 / v0.8.3 regression: no
+		// snake_case keys, no azureSearch sub-envelope.
+		mustNotContain := []string{
+			`"connection_name"`,
+			`"index_name"`,
+			`"field_mapping"`,
+			`"azureSearch"`,
+			`"azure_search"`,
+		}
+		for _, no := range mustNotContain {
+			if strings.Contains(raw, no) {
+				t.Errorf("body must not contain %q, got %s", no, raw)
+			}
+		}
+
+		return newProbeResponse(http.StatusOK, `{"name":"x","version":"1","type":"AzureSearch","connectionName":"search-conn","indexName":"fraud-policies-ks-index"}`), nil
+	})
+
+	c := newTestClient(rt)
+	if _, err := c.CreateOrUpdateProjectIndex(context.Background(), ProjectIndex{
+		Name:           "x",
+		Type:           ProjectIndexTypeAzureSearch,
+		ConnectionName: "search-conn",
+		IndexName:      "fraud-policies-ks-index",
+	}); err != nil {
+		t.Fatalf("CreateOrUpdateProjectIndex: %v", err)
+	}
+}
+
 func TestProjectIndex_FieldMappingRoundTrips(t *testing.T) {
 	t.Parallel()
 
@@ -144,7 +205,7 @@ func TestProjectIndex_FieldMappingRoundTrips(t *testing.T) {
 			t.Errorf("unexpected url_field: %q", payload.FieldMapping.URLField)
 		}
 
-		body := `{"name":"x","version":"1","type":"AzureSearch","connection_name":"c","index_name":"i","field_mapping":{"content_fields":["title","body"],"url_field":"source_url"}}`
+		body := `{"name":"x","version":"1","type":"AzureSearch","connectionName":"c","indexName":"i","fieldMapping":{"contentFields":["title","body"],"urlField":"source_url"}}`
 		return newProbeResponse(http.StatusOK, body), nil
 	})
 

@@ -134,3 +134,11 @@ linters:
       - path: internal/client/(knowledge_source_v2|knowledge_base_v2)\.go
         linters:
           - tagliatelle
+      # Foundry project_indexes uses camelCase JSON keys (connectionName,
+      # indexName, fieldMapping, …) per the SDK's rest_field annotations
+      # in azure-ai-projects/.../models/_models.py. Different from the
+      # snake_case Foundry-agent convention — the Indexes API is shaped
+      # like the AzureML asset surface.
+      - path: internal/client/project_index_v2\.go
+        linters:
+          - tagliatelle

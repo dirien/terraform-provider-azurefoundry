@@ -46,9 +46,21 @@ const ProjectIndexDefaultVersion = "1"
 const ProjectIndexTypeAzureSearch = "AzureSearch"
 
 // ProjectIndex is the wire envelope. The variant-specific fields
-// (connection_name, index_name, field_mapping) live on the same object
-// as the discriminator — Foundry doesn't nest them under a per-type
-// sub-object the way the agent tools do.
+// (connectionName, indexName, fieldMapping) live FLAT on the same
+// object as the discriminator — Foundry doesn't nest them under a
+// per-type sub-object the way the agent tools do.
+//
+// Wire keys are camelCase per the Python SDK's rest_field annotations
+// in azure-ai-projects/.../models/_models.py:
+//
+//	connection_name: str = rest_field(name="connectionName", …)
+//	index_name:      str = rest_field(name="indexName", …)
+//	field_mapping:   ... = rest_field(name="fieldMapping", …)
+//
+// v0.8.2 / v0.8.3 used snake_case JSON tags here; Foundry validated the
+// flat envelope, didn't see connectionName / indexName, and returned 400
+// "ConnectionName field is required". Issue #14 captured the verbatim
+// 200-response shape — this struct now matches.
 type ProjectIndex struct {
 	Name           string            `json:"name"`
 	Version        string            `json:"version"`
@@ -56,22 +68,23 @@ type ProjectIndex struct {
 	ID             string            `json:"id,omitempty"`
 	Description    string            `json:"description,omitempty"`
 	Tags           map[string]string `json:"tags,omitempty"`
-	ConnectionName string            `json:"connection_name,omitempty"`
-	IndexName      string            `json:"index_name,omitempty"`
-	FieldMapping   *FieldMapping     `json:"field_mapping,omitempty"`
+	ConnectionName string            `json:"connectionName,omitempty"`
+	IndexName      string            `json:"indexName,omitempty"`
+	FieldMapping   *FieldMapping     `json:"fieldMapping,omitempty"`
 }
 
 // FieldMapping is the optional column-rename envelope on AzureAISearchIndex.
 // Empty pointer means "use the index's default schema". Specific fields
 // stay strings even when they're nullable on the wire — the resource
-// layer translates "" → null to keep the round-trip clean.
+// layer translates "" → null to keep the round-trip clean. JSON keys are
+// camelCase per the SDK's rest_field annotations.
 type FieldMapping struct {
-	ContentFields  []string `json:"content_fields,omitempty"`
-	FilepathField  string   `json:"filepath_field,omitempty"`
-	TitleField     string   `json:"title_field,omitempty"`
-	URLField       string   `json:"url_field,omitempty"`
-	VectorFields   []string `json:"vector_fields,omitempty"`
-	MetadataFields []string `json:"metadata_fields,omitempty"`
+	ContentFields  []string `json:"contentFields,omitempty"`
+	FilepathField  string   `json:"filepathField,omitempty"`
+	TitleField     string   `json:"titleField,omitempty"`
+	URLField       string   `json:"urlField,omitempty"`
+	VectorFields   []string `json:"vectorFields,omitempty"`
+	MetadataFields []string `json:"metadataFields,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
