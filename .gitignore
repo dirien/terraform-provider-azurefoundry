@@ -68,3 +68,6 @@ terraform-provider-*
 !terraform-provider-*.zip
 .claude
 .mcp.json
+
+# agent-rules verifier runtime artifact
+.agents/
