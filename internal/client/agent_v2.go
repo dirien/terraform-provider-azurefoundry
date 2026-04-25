@@ -149,12 +149,21 @@ type OpenAPIToolV2 struct {
 }
 
 // MCPToolV2 — Model Context Protocol server.
+//
+// AllowedTools narrows the set of tool names the model may invoke from the
+// MCP server (e.g. ["knowledge_base_retrieve"] for Foundry IQ KBs); empty
+// means all advertised tools are available. Headers carries arbitrary
+// HTTP headers Foundry sends on every MCP request — primarily used for
+// per-request auth tokens like x-ms-query-source-authorization on
+// remote-SharePoint knowledge sources.
 type MCPToolV2 struct {
-	Type                string `json:"type"` // "mcp"
-	ServerLabel         string `json:"server_label"`
-	ServerURL           string `json:"server_url"`
-	RequireApproval     string `json:"require_approval,omitempty"`
-	ProjectConnectionID string `json:"project_connection_id,omitempty"`
+	Type                string            `json:"type"` // "mcp"
+	ServerLabel         string            `json:"server_label"`
+	ServerURL           string            `json:"server_url"`
+	RequireApproval     string            `json:"require_approval,omitempty"`
+	ProjectConnectionID string            `json:"project_connection_id,omitempty"`
+	AllowedTools        []string          `json:"allowed_tools,omitempty"`
+	Headers             map[string]string `json:"headers,omitempty"`
 }
 
 // AzureAISearchToolV2 — Azure AI Search via project connection + index.

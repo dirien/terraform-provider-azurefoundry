@@ -20,6 +20,9 @@ Backend services (Go)
 | `client/vector_store.go` | Vector store CRUD shared between v1/v2 generations + `WaitForVectorStore`. |
 | `client/memory_store_v2.go` | Memory store CRUD (preview, separate `MemoryStoreAPIVersion`). |
 | `client/toolbox_v2.go` | Toolbox CRUD (preview, `Toolboxes=V1Preview`); versioned via POST `/toolboxes/{name}/versions` + PATCH default_version. |
+| `client/search_client.go` | `SearchClient` for the Azure AI Search data plane (separate token scope `https://search.azure.com/.default`, separate endpoint per call). Lazily constructed via `FoundryClient.SearchClient()`; only available under Entra auth. |
+| `client/knowledge_source_v2.go` | Knowledge Source CRUD (preview, `api-version=2025-11-01-preview`). Polymorphic on `kind`; today supports `azureBlob` + `searchIndex`. Wire types use camelCase JSON keys per the Search REST API — tagliatelle is excluded for these files. |
+| `client/knowledge_base_v2.go` | Knowledge Base CRUD + `KnowledgeBaseMCPEndpoint` URL builder. `models[]` discriminator currently only `azureOpenAI`. |
 | `client/client_test.go` | First-class testing pattern: `roundTripperFunc` + injected backoff for `WaitForProjectReady`. |
 | `resources/foundry_agent.go` | `azurefoundry_agent` (classic Assistants resource). |
 | `resources/foundry_agent_v2.go` | `azurefoundry_agent_v2` — biggest file; polymorphic tools dispatch via `toolExtractors` / `toolWirers` maps. |
@@ -29,6 +32,8 @@ Backend services (Go)
 | `resources/foundry_vector_store_v2.go` | `azurefoundry_vector_store_v2`. |
 | `resources/foundry_memory_store_v2.go` | `azurefoundry_memory_store_v2` (preview). |
 | `resources/foundry_toolbox_v2.go` | `azurefoundry_toolbox_v2` (preview). Reuses `toolExtractors`/`toolWirers` from agent_v2 for tool variant dispatch. Versions are append-only — Update posts a new version + optionally promotes it. |
+| `resources/foundry_knowledge_source.go` | `azurefoundry_knowledge_source` (preview). Polymorphic on `kind`; `azureBlob` + `searchIndex`. Per-resource `search_endpoint` so one provider config can manage multiple Search services. Synthetic ID format `<search_endpoint>\|<name>` for import. |
+| `resources/foundry_knowledge_base.go` | `azurefoundry_knowledge_base` (preview). References KSes by name; computed `mcp_endpoint` is the URL agents wire into the typed `knowledge_base` tool variant on agent_v2. |
 
 ## Golden Samples (follow these patterns)
 | Pattern | Reference |

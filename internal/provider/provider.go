@@ -199,6 +199,8 @@ func (p *AzureFoundryProvider) Resources(_ context.Context) []func() resource.Re
 		resources.NewFoundryVectorStoreV2Resource,
 		resources.NewFoundryMemoryStoreV2Resource,
 		resources.NewFoundryToolboxV2Resource,
+		resources.NewFoundryKnowledgeSourceResource,
+		resources.NewFoundryKnowledgeBaseResource,
 	}
 }
 

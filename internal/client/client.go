@@ -52,6 +52,13 @@ type FoundryClient struct {
 	// pays the propagation cost.
 	projectReady   atomic.Bool
 	projectReadyMu sync.Mutex
+
+	// search lazily caches a sub-client for the Azure AI Search data plane
+	// (knowledge sources, knowledge bases). Created via SearchClient(); guarded
+	// by projectReadyMu since both fields are touched at provider-warmup time
+	// and we don't need a second mutex. Nil when api-key auth was used —
+	// SearchClient() returns an error in that case.
+	search *SearchClient
 }
 
 // NewFoundryClientWithCredential builds a client that uses the given
