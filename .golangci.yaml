@@ -119,3 +119,18 @@ linters:
         - G104
         - G204
         - G304
+        # G101 false-positive on public OAuth scope constants like
+        # "https://search.azure.com/.default" — these aren't credentials,
+        # they're well-known AAD scope identifiers we send to GetToken.
+        - G101
+
+  exclusions:
+    rules:
+      # Search data-plane wire types use the camelCase JSON keys the Azure
+      # AI Search REST API documents (azureBlobParameters, containerName,
+      # @odata.etag, …). Tagliatelle would otherwise force them to
+      # snake_case, which would break the on-the-wire shape. Foundry-data-
+      # plane wire types stay snake_case as before.
+      - path: internal/client/(knowledge_source_v2|knowledge_base_v2)\.go
+        linters:
+          - tagliatelle

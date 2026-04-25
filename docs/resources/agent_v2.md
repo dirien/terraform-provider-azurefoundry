@@ -120,7 +120,7 @@ Required:
 
 Required:
 
-- `type` (String) Tool type. One of `file_search`, `code_interpreter`, `web_search`, `bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`.
+- `type` (String) Tool type. One of `file_search`, `code_interpreter`, `web_search`, `bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`, `knowledge_base`.
 
 Optional:
 
@@ -128,6 +128,7 @@ Optional:
 - `bing_grounding` (Attributes) Bing Search v7 grounding via a project connection. Used when `type = "bing_grounding"`. For the managed Foundry-hosted variant that needs no connection, use `type = "web_search"`. (see [below for nested schema](#nestedatt--tools--bing_grounding))
 - `code_interpreter` (Attributes) Sandboxed Python execution. Used when `type = "code_interpreter"`. (see [below for nested schema](#nestedatt--tools--code_interpreter))
 - `function` (Attributes) OpenAI-style function calling. Used when `type = "function"`. `parameters_json` is a JSON Schema describing the function's arguments. (see [below for nested schema](#nestedatt--tools--function))
+- `knowledge_base` (Attributes) Foundry IQ knowledge base shorthand. Used when `type = "knowledge_base"`. The provider expands this at extract time into a wire-level `mcp` tool block with `allowed_tools = ["knowledge_base_retrieve"]` and `server_url = knowledge_base_endpoint`. Use it in place of an inline `mcp` block when attaching an `azurefoundry_knowledge_base` — the typed variant carries the right defaults and reads cleaner. (see [below for nested schema](#nestedatt--tools--knowledge_base))
 - `max_num_results` (Number) Maximum search hits returned per query. Used when `type = "file_search"`. Defaults to the Foundry server-side default.
 - `mcp` (Attributes) Model Context Protocol server. Used when `type = "mcp"`. (see [below for nested schema](#nestedatt--tools--mcp))
 - `memory_search` (Attributes) Attach a Foundry Memory store (preview). Used when `type = "memory_search"`. The wire spelling is `memory_search_preview` while the feature is in preview; this provider accepts the shorter `memory_search` and translates at the boundary so consumer HCL stays stable across the GA cut-over. (see [below for nested schema](#nestedatt--tools--memory_search))
@@ -185,6 +186,21 @@ Optional:
 - `parameters_json` (String) JSON Schema (as a string) for the function's parameters. Use `jsonencode({...})` in HCL.
 
 
+<a id="nestedatt--tools--knowledge_base"></a>
+### Nested Schema for `tools.knowledge_base`
+
+Required:
+
+- `knowledge_base_endpoint` (String) MCP endpoint of the knowledge base. Wire `azurefoundry_knowledge_base.X.mcp_endpoint` directly into this attribute.
+- `project_connection_id` (String) Project connection (RemoteTool, ProjectManagedIdentity, audience=`https://search.azure.com/`) authorizing the agent to call the KB. Manage it via `azurerm_cognitive_account_project_connection` or `azure-native:cognitiveservices:Connection` — pass its name here.
+
+Optional:
+
+- `headers` (Map of String) Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement.
+- `require_approval` (String) `always`, `never`, or omitted (Foundry default). Defaults to `"never"` for the typed variant — KB lookups are read-only.
+- `server_label` (String) Display label shown in tool-call traces. Defaults to `"knowledge-base"`.
+
+
 <a id="nestedatt--tools--mcp"></a>
 ### Nested Schema for `tools.mcp`
 
@@ -195,6 +211,8 @@ Required:
 
 Optional:
 
+- `allowed_tools` (List of String) Optional allow-list of MCP tool names the model may invoke. Empty means all advertised tools are available. Set this to scope down a server that exposes more than the agent should use; required for Foundry IQ knowledge bases (`["knowledge_base_retrieve"]`) — though prefer the typed `knowledge_base` variant for that case.
+- `headers` (Map of String) Optional HTTP headers Foundry sends on every MCP request. Primarily used for per-request auth tokens like `x-ms-query-source-authorization` against remote-SharePoint knowledge sources.
 - `project_connection_id` (String) Project connection ID used to authenticate to the MCP server.
 - `require_approval` (String) `always`, `never`, or omitted (Foundry default). Controls whether the user must approve tool invocations before they run.
 

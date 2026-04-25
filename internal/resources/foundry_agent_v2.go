@@ -34,6 +34,12 @@ var (
 const (
 	toolTypeMemorySearch        = "memory_search"
 	toolTypeMemorySearchPreview = "memory_search_preview"
+	toolTypeKnowledgeBase       = "knowledge_base"
+
+	// kbRetrieveAllowedTool is the only tool name a Foundry IQ KB exposes
+	// over MCP today. Hard-coded into the typed knowledge_base variant
+	// expansion so users don't have to spell it themselves.
+	kbRetrieveAllowedTool = "knowledge_base_retrieve"
 )
 
 func NewFoundryAgentV2Resource() resource.Resource {
@@ -101,6 +107,7 @@ type toolModelV2 struct {
 	AzureAISearch   types.Object `tfsdk:"azure_ai_search"`
 	BingGrounding   types.Object `tfsdk:"bing_grounding"`
 	MemorySearch    types.Object `tfsdk:"memory_search"`
+	KnowledgeBase   types.Object `tfsdk:"knowledge_base"`
 }
 
 // ── Tool variant attribute type maps ────────────────────────────────────────
@@ -127,6 +134,20 @@ var mcpAttrTypes = map[string]attr.Type{
 	"server_url":            types.StringType,
 	"require_approval":      types.StringType,
 	"project_connection_id": types.StringType,
+	"allowed_tools":         types.ListType{ElemType: types.StringType},
+	"headers":               types.MapType{ElemType: types.StringType},
+}
+
+// knowledgeBaseAttrTypes is the typed shorthand for attaching a Foundry IQ
+// KB. Expanded at extract time into an mcp wire entry with
+// allowed_tools=["knowledge_base_retrieve"] and the KB's MCP endpoint as
+// server_url.
+var knowledgeBaseAttrTypes = map[string]attr.Type{
+	"knowledge_base_endpoint": types.StringType,
+	"project_connection_id":   types.StringType,
+	"server_label":            types.StringType,
+	"require_approval":        types.StringType,
+	"headers":                 types.MapType{ElemType: types.StringType},
 }
 
 var azureAISearchIndexAttrTypes = map[string]attr.Type{
@@ -161,6 +182,7 @@ var toolAttrTypesV2 = map[string]attr.Type{
 	"azure_ai_search":  types.ObjectType{AttrTypes: azureAISearchAttrTypes},
 	"bing_grounding":   types.ObjectType{AttrTypes: bingGroundingAttrTypes},
 	"memory_search":    types.ObjectType{AttrTypes: memorySearchAttrTypes},
+	"knowledge_base":   types.ObjectType{AttrTypes: knowledgeBaseAttrTypes},
 }
 
 func (r *FoundryAgentV2Resource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -304,7 +326,8 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 					Attributes: map[string]schema.Attribute{
 						"type": schema.StringAttribute{
 							MarkdownDescription: "Tool type. One of `file_search`, `code_interpreter`, `web_search`, " +
-								"`bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`.",
+								"`bing_grounding`, `function`, `openapi`, `mcp`, `azure_ai_search`, `memory_search`, " +
+								"`knowledge_base`.",
 							Required: true,
 							Validators: []validator.String{
 								stringvalidator.OneOf(
@@ -317,6 +340,7 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 									"mcp",
 									"azure_ai_search",
 									"memory_search",
+									toolTypeKnowledgeBase,
 								),
 							},
 						},
@@ -405,6 +429,57 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 								"project_connection_id": schema.StringAttribute{
 									MarkdownDescription: "Project connection ID used to authenticate to the MCP server.",
 									Optional:            true,
+								},
+								"allowed_tools": schema.ListAttribute{
+									MarkdownDescription: "Optional allow-list of MCP tool names the model may invoke. " +
+										"Empty means all advertised tools are available. Set this to scope down a server " +
+										"that exposes more than the agent should use; required for Foundry IQ knowledge " +
+										"bases (`[\"knowledge_base_retrieve\"]`) — though prefer the typed `knowledge_base` " +
+										"variant for that case.",
+									Optional:    true,
+									ElementType: types.StringType,
+								},
+								"headers": schema.MapAttribute{
+									MarkdownDescription: "Optional HTTP headers Foundry sends on every MCP request. " +
+										"Primarily used for per-request auth tokens like " +
+										"`x-ms-query-source-authorization` against remote-SharePoint knowledge sources.",
+									Optional:    true,
+									ElementType: types.StringType,
+								},
+							},
+						},
+						"knowledge_base": schema.SingleNestedAttribute{
+							MarkdownDescription: "Foundry IQ knowledge base shorthand. Used when `type = \"knowledge_base\"`. " +
+								"The provider expands this at extract time into a wire-level `mcp` tool block with " +
+								"`allowed_tools = [\"knowledge_base_retrieve\"]` and `server_url = knowledge_base_endpoint`. " +
+								"Use it in place of an inline `mcp` block when attaching an `azurefoundry_knowledge_base` — " +
+								"the typed variant carries the right defaults and reads cleaner.",
+							Optional: true,
+							Attributes: map[string]schema.Attribute{
+								"knowledge_base_endpoint": schema.StringAttribute{
+									MarkdownDescription: "MCP endpoint of the knowledge base. Wire " +
+										"`azurefoundry_knowledge_base.X.mcp_endpoint` directly into this attribute.",
+									Required: true,
+								},
+								"project_connection_id": schema.StringAttribute{
+									MarkdownDescription: "Project connection (RemoteTool, ProjectManagedIdentity, " +
+										"audience=`https://search.azure.com/`) authorizing the agent to call the KB. " +
+										"Manage it via `azurerm_cognitive_account_project_connection` or " +
+										"`azure-native:cognitiveservices:Connection` — pass its name here.",
+									Required: true,
+								},
+								"server_label": schema.StringAttribute{
+									MarkdownDescription: "Display label shown in tool-call traces. Defaults to `\"knowledge-base\"`.",
+									Optional:            true,
+								},
+								"require_approval": schema.StringAttribute{
+									MarkdownDescription: "`always`, `never`, or omitted (Foundry default). Defaults to `\"never\"` for the typed variant — KB lookups are read-only.",
+									Optional:            true,
+								},
+								"headers": schema.MapAttribute{
+									MarkdownDescription: "Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement.",
+									Optional:            true,
+									ElementType:         types.StringType,
 								},
 							},
 						},
@@ -959,15 +1034,16 @@ type toolExtractor func(ctx context.Context, t *toolModelV2) (any, diag.Diagnost
 // well below the gocyclo budget. Adding a new tool type is one map entry +
 // one function below, no surgery on extractV2Tools itself.
 var toolExtractors = map[string]toolExtractor{
-	"file_search":        extractFileSearchTool,
-	"code_interpreter":   extractCodeInterpreterTool,
-	"web_search":         extractWebSearchTool,
-	"bing_grounding":     extractBingGroundingTool,
-	"function":           extractFunctionTool,
-	"openapi":            extractOpenAPITool,
-	"mcp":                extractMCPTool,
-	"azure_ai_search":    extractAzureAISearchTool,
-	toolTypeMemorySearch: extractMemorySearchTool,
+	"file_search":         extractFileSearchTool,
+	"code_interpreter":    extractCodeInterpreterTool,
+	"web_search":          extractWebSearchTool,
+	"bing_grounding":      extractBingGroundingTool,
+	"function":            extractFunctionTool,
+	"openapi":             extractOpenAPITool,
+	"mcp":                 extractMCPTool,
+	"azure_ai_search":     extractAzureAISearchTool,
+	toolTypeMemorySearch:  extractMemorySearchTool,
+	toolTypeKnowledgeBase: extractKnowledgeBaseTool,
 }
 
 func extractV2Tools(ctx context.Context, toolsList types.List) ([]any, diag.Diagnostics) {
@@ -1075,7 +1151,7 @@ func extractOpenAPITool(_ context.Context, t *toolModelV2) (any, diag.Diagnostic
 	return tool, diags
 }
 
-func extractMCPTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+func extractMCPTool(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics) {
 	tool := client.MCPToolV2{Type: "mcp"}
 	if t.MCP.IsNull() || t.MCP.IsUnknown() {
 		return tool, nil
@@ -1085,7 +1161,71 @@ func extractMCPTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
 	tool.ServerURL = stringAttr(attrs, "server_url")
 	tool.RequireApproval = stringAttr(attrs, "require_approval")
 	tool.ProjectConnectionID = stringAttr(attrs, "project_connection_id")
+	if v, ok := attrs["allowed_tools"].(types.List); ok {
+		allowed, _ := extractStringList(ctx, v)
+		tool.AllowedTools = allowed
+	}
+	if v, ok := attrs["headers"].(types.Map); ok {
+		tool.Headers = extractStringMap(ctx, v)
+	}
 	return tool, nil
+}
+
+// extractKnowledgeBaseTool expands the typed knowledge_base shorthand into
+// a wire-level MCP tool: server_url = knowledge_base_endpoint,
+// allowed_tools = ["knowledge_base_retrieve"], plus the user-supplied
+// project_connection_id and optional headers / server_label / require_approval.
+// Defaults match the Foundry IQ how-to: server_label="knowledge-base",
+// require_approval="never".
+func extractKnowledgeBaseTool(ctx context.Context, t *toolModelV2) (any, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	tool := client.MCPToolV2{
+		Type:         "mcp",
+		AllowedTools: []string{kbRetrieveAllowedTool},
+	}
+	if t.KnowledgeBase.IsNull() || t.KnowledgeBase.IsUnknown() {
+		diags.AddError(
+			"Missing knowledge_base block",
+			"`type = \"knowledge_base\"` requires a `knowledge_base` block with `knowledge_base_endpoint` and `project_connection_id`.",
+		)
+		return tool, diags
+	}
+	attrs := t.KnowledgeBase.Attributes()
+	tool.ServerURL = stringAttr(attrs, "knowledge_base_endpoint")
+	tool.ProjectConnectionID = stringAttr(attrs, "project_connection_id")
+
+	tool.ServerLabel = stringAttr(attrs, "server_label")
+	if tool.ServerLabel == "" {
+		tool.ServerLabel = "knowledge-base"
+	}
+	tool.RequireApproval = stringAttr(attrs, "require_approval")
+	if tool.RequireApproval == "" {
+		tool.RequireApproval = "never"
+	}
+	if v, ok := attrs["headers"].(types.Map); ok {
+		tool.Headers = extractStringMap(ctx, v)
+	}
+	return tool, diags
+}
+
+// extractStringMap pulls a types.Map of strings into a Go map. Returns nil
+// for a null/unknown source so omitempty wire fields stay clean.
+func extractStringMap(_ context.Context, m types.Map) map[string]string {
+	if m.IsNull() || m.IsUnknown() {
+		return nil
+	}
+	out := make(map[string]string, len(m.Elements()))
+	for k, v := range m.Elements() {
+		s, ok := v.(types.String)
+		if !ok || s.IsNull() || s.IsUnknown() {
+			continue
+		}
+		out[k] = s.ValueString()
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func extractAzureAISearchTool(_ context.Context, t *toolModelV2) (any, diag.Diagnostics) {
@@ -1213,6 +1353,7 @@ func nullToolVariantSlots(tt string) map[string]attr.Value {
 		"azure_ai_search":  types.ObjectNull(azureAISearchAttrTypes),
 		"bing_grounding":   types.ObjectNull(bingGroundingAttrTypes),
 		"memory_search":    types.ObjectNull(memorySearchAttrTypes),
+		"knowledge_base":   types.ObjectNull(knowledgeBaseAttrTypes),
 	}
 }
 
@@ -1277,14 +1418,43 @@ func wireOpenAPITool(toolMap map[string]any, values map[string]attr.Value) diag.
 }
 
 func wireMCPTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
-	obj, diags := types.ObjectValue(mcpAttrTypes, map[string]attr.Value{
+	var diags diag.Diagnostics
+	allowedRaw, _ := toolMap["allowed_tools"].([]any)
+	allowed, d := stringListFromAny(allowedRaw)
+	diags.Append(d...)
+
+	headers, d := stringMapFromAny(toolMap["headers"])
+	diags.Append(d...)
+
+	obj, d := types.ObjectValue(mcpAttrTypes, map[string]attr.Value{
 		"server_label":          types.StringValue(stringFromMap(toolMap, "server_label")),
 		"server_url":            types.StringValue(stringFromMap(toolMap, "server_url")),
 		"require_approval":      types.StringValue(stringFromMap(toolMap, "require_approval")),
 		"project_connection_id": types.StringValue(stringFromMap(toolMap, "project_connection_id")),
+		"allowed_tools":         allowed,
+		"headers":               headers,
 	})
+	diags.Append(d...)
 	values["mcp"] = obj
 	return diags
+}
+
+// stringMapFromAny converts a wire-side map[string]any (decoded JSON) into
+// a Plugin Framework types.Map of strings, preserving null vs empty-map
+// distinction. Non-string values are coerced to "" rather than failing —
+// Foundry's MCP `headers` are documented as string-only, so the coercion
+// is a guardrail not a real path.
+func stringMapFromAny(in any) (types.Map, diag.Diagnostics) {
+	m, ok := in.(map[string]any)
+	if !ok {
+		return types.MapNull(types.StringType), nil
+	}
+	values := make(map[string]attr.Value, len(m))
+	for k, v := range m {
+		s, _ := v.(string)
+		values[k] = types.StringValue(s)
+	}
+	return types.MapValue(types.StringType, values)
 }
 
 func wireAzureAISearchTool(toolMap map[string]any, values map[string]attr.Value) diag.Diagnostics {
