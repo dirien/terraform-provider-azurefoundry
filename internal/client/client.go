@@ -499,6 +499,56 @@ func (c *FoundryClient) DeleteAgentV2(ctx context.Context, name string) (*Delete
     return &result, nil
 }
 
+// WaitForAgentV2Ready polls the agent's Responses endpoint until the
+// per-session sandbox is warm enough to accept traffic. Foundry returns
+// HTTP 424 ("session_not_ready") while the sandbox is cold-starting; once
+// the agent route is up, a GET against the (POST-only) Responses URL
+// returns 405 ("Method Not Allowed") — that's our positive readiness
+// signal. Any other 2xx/3xx/4xx (except 424) is treated as ready since
+// it means the route reached the agent. 5xx and transport errors are
+// retried up to the timeout.
+//
+// pollInterval is clamped to a 1s minimum to avoid hammering the API.
+// Only meaningful for kind="hosted" / "container_app" agents. Calling
+// this on a kind="prompt" agent returns nil immediately because the
+// Responses endpoint isn't agent-routed for prompt agents.
+func (c *FoundryClient) WaitForAgentV2Ready(ctx context.Context, name string, timeout, pollInterval time.Duration) error {
+	if pollInterval < time.Second {
+		pollInterval = time.Second
+	}
+	url := fmt.Sprintf("%s/agents/%s/endpoint/protocols/responses/v1/responses", c.ProjectEndpoint, name)
+	deadline := time.Now().Add(timeout)
+	for {
+		httpReq, err := c.newRequest(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("building readiness probe: %w", err)
+		}
+		resp, err := c.httpClient.Do(httpReq)
+		if err == nil {
+			status := resp.StatusCode
+			resp.Body.Close()
+			// 424 is the documented "session_not_ready" — keep polling.
+			// 5xx are transient — keep polling.
+			// Anything else means the agent route is up.
+			if status != http.StatusFailedDependency && (status < 500 || status >= 600) {
+				return nil
+			}
+		}
+		// network error or 424/5xx — retry until the deadline.
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("agent %q did not become ready within %s: last error: %w", name, timeout, err)
+			}
+			return fmt.Errorf("agent %q did not become ready within %s: still returning HTTP 424 / 5xx", name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // File CRUD
 // ─────────────────────────────────────────────────────────────────────────────

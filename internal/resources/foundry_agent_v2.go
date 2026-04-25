@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/dirien/terraform-provider-azurefoundry/internal/client"
 
@@ -52,6 +53,12 @@ type FoundryAgentV2ResourceModel struct {
 	Memory                    types.String `tfsdk:"memory"`
 	ContainerProtocolVersions types.List   `tfsdk:"container_protocol_versions"`
 	EnvironmentVariables      types.Map    `tfsdk:"environment_variables"`
+
+	// Warmup: when true on a kind="hosted" agent, Create blocks until the
+	// agent's Responses endpoint stops returning HTTP 424
+	// (session_not_ready). Defaults to false. No-op for kind="prompt".
+	Warmup        types.Bool   `tfsdk:"warmup"`
+	WarmupTimeout types.String `tfsdk:"warmup_timeout"`
 
 	// Computed: Foundry-managed Entra identity Foundry creates for each
 	// hosted-agent version. Grant `Azure AI User` to this identity for the
@@ -234,6 +241,14 @@ func (r *FoundryAgentV2Resource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:            true,
 				ElementType:         types.StringType,
 			},
+			"warmup": schema.BoolAttribute{
+				MarkdownDescription: "When `true` on a `kind=\"hosted\"` agent, Create blocks until the per-session sandbox responds non-424 on its Responses endpoint. Lets dependent resources rely on the agent being immediately reachable. No-op for `kind=\"prompt\"`. Defaults to `false`.",
+				Optional:            true,
+			},
+			"warmup_timeout": schema.StringAttribute{
+				MarkdownDescription: "Maximum time to wait for the agent to become ready when `warmup=true`. Go duration string (e.g. `5m`, `90s`). Defaults to `5m`.",
+				Optional:            true,
+			},
 		},
 		Blocks: map[string]schema.Block{
 			"tools": schema.ListNestedBlock{
@@ -405,6 +420,31 @@ func (r *FoundryAgentV2Resource) Create(ctx context.Context, req resource.Create
 	resp.Diagnostics.Append(responseToV2Model(ctx, agentResp, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// Warmup is opt-in and only meaningful for hosted agents — prompt
+	// agents are reachable as soon as Create returns (no per-session
+	// sandbox to cold-start).
+	wantWarmup := !plan.Warmup.IsNull() && !plan.Warmup.IsUnknown() && plan.Warmup.ValueBool()
+	isHosted := plan.Kind.ValueString() == "hosted" || plan.Kind.ValueString() == "container_app"
+	if wantWarmup && isHosted {
+		timeout := 5 * time.Minute
+		if !plan.WarmupTimeout.IsNull() && !plan.WarmupTimeout.IsUnknown() {
+			if d, derr := time.ParseDuration(plan.WarmupTimeout.ValueString()); derr == nil && d > 0 {
+				timeout = d
+			} else if derr != nil {
+				resp.Diagnostics.AddError(
+					"Invalid warmup_timeout",
+					fmt.Sprintf("warmup_timeout %q is not a valid Go duration: %s", plan.WarmupTimeout.ValueString(), derr.Error()),
+				)
+				return
+			}
+		}
+		tflog.Debug(ctx, "Warming up Foundry agent", map[string]interface{}{"name": apiReq.Name, "timeout": timeout.String()})
+		if err := r.client.WaitForAgentV2Ready(ctx, apiReq.Name, timeout, 5*time.Second); err != nil {
+			resp.Diagnostics.AddError("Agent warmup failed", err.Error())
+			return
+		}
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
