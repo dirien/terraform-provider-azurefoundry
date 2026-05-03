@@ -179,6 +179,7 @@ Optional:
 - `bing_grounding` (Attributes) Bing Search v7 grounding via a project connection. Used when `type = "bing_grounding"`. (see [below for nested schema](#nestedatt--tools--bing_grounding))
 - `code_interpreter` (Attributes) Sandboxed Python execution. Used when `type = "code_interpreter"`. (see [below for nested schema](#nestedatt--tools--code_interpreter))
 - `function` (Attributes) OpenAI-style function calling. Used when `type = "function"`. (see [below for nested schema](#nestedatt--tools--function))
+- `knowledge_base` (Attributes) Foundry IQ knowledge base shorthand. Used when `type = "knowledge_base"`. The provider expands this at extract time into a wire-level `mcp` tool block with `allowed_tools = ["knowledge_base_retrieve"]` and `server_url = knowledge_base_endpoint`. Mirrors the same block on `azurefoundry_agent_v2.tools[*]`; the toolbox surfaces it for completeness — most KB attaches happen on the agent side. (see [below for nested schema](#nestedatt--tools--knowledge_base))
 - `max_num_results` (Number) Maximum search hits returned per query. Used when `type = "file_search"`.
 - `mcp` (Attributes) Model Context Protocol server. Used when `type = "mcp"`. Most common toolbox variant — pair with a `RemoteTool`-category project connection for authenticated upstreams. (see [below for nested schema](#nestedatt--tools--mcp))
 - `memory_search` (Attributes) Attach a Foundry Memory store (preview). Used when `type = "memory_search"`. (see [below for nested schema](#nestedatt--tools--memory_search))
@@ -234,6 +235,21 @@ Optional:
 
 - `description` (String) Human-readable description shown to the model.
 - `parameters_json` (String) JSON Schema (as a string) for the function's parameters.
+
+
+<a id="nestedatt--tools--knowledge_base"></a>
+### Nested Schema for `tools.knowledge_base`
+
+Required:
+
+- `knowledge_base_endpoint` (String) MCP endpoint of the knowledge base. Wire `azurefoundry_knowledge_base.X.mcp_endpoint` directly into this attribute.
+- `project_connection_id` (String) Project connection (RemoteTool, ProjectManagedIdentity, audience=`https://search.azure.com/`) authorizing the toolbox to call the KB. Manage it via `azurerm_cognitive_account_project_connection` or `azure-native:cognitiveservices:Connection` — pass its name here.
+
+Optional:
+
+- `headers` (Map of String, Sensitive) Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement. Marked sensitive — values are redacted from plan / state output.
+- `require_approval` (String) `always`, `never`, or omitted (Foundry default). Defaults to `"never"` for the typed variant — KB lookups are read-only.
+- `server_label` (String) Display label shown in tool-call traces. Defaults to `"knowledge-base"`.
 
 
 <a id="nestedatt--tools--mcp"></a>
