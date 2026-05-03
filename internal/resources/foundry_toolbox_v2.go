@@ -288,6 +288,45 @@ func toolboxToolsNestedBlock() schema.NestedBlockObject {
 					"update_delay":      schema.Int64Attribute{MarkdownDescription: "Seconds of inactivity before extracted memories are written back.", Optional: true},
 				},
 			},
+			// Mirrors the agent_v2 schema. Required even if the typed
+			// shorthand is rarely used inside a toolbox: extractV2Tools
+			// deserializes the toolbox tool list into the SAME toolModelV2
+			// struct the agent uses, and that struct has a knowledge_base
+			// field. Without this attribute the framework's struct↔object
+			// converter raises "Struct defines fields not found in object:
+			// knowledge_base" before any of our resource code runs (#PR-17).
+			"knowledge_base": schema.SingleNestedAttribute{
+				MarkdownDescription: "Foundry IQ knowledge base shorthand. Used when `type = \"knowledge_base\"`. " +
+					"The provider expands this at extract time into a wire-level `mcp` tool block with " +
+					"`allowed_tools = [\"knowledge_base_retrieve\"]` and `server_url = knowledge_base_endpoint`. " +
+					"Mirrors the same block on `azurefoundry_agent_v2.tools[*]`; the toolbox surfaces it for " +
+					"completeness — most KB attaches happen on the agent side.",
+				Optional: true,
+				Attributes: map[string]schema.Attribute{
+					"knowledge_base_endpoint": schema.StringAttribute{
+						MarkdownDescription: "MCP endpoint of the knowledge base. Wire `azurefoundry_knowledge_base.X.mcp_endpoint` directly into this attribute.",
+						Required:            true,
+					},
+					"project_connection_id": schema.StringAttribute{
+						MarkdownDescription: "Project connection (RemoteTool, ProjectManagedIdentity, audience=`https://search.azure.com/`) authorizing the toolbox to call the KB. Manage it via `azurerm_cognitive_account_project_connection` or `azure-native:cognitiveservices:Connection` — pass its name here.",
+						Required:            true,
+					},
+					"server_label": schema.StringAttribute{
+						MarkdownDescription: "Display label shown in tool-call traces. Defaults to `\"knowledge-base\"`.",
+						Optional:            true,
+					},
+					"require_approval": schema.StringAttribute{
+						MarkdownDescription: "`always`, `never`, or omitted (Foundry default). Defaults to `\"never\"` for the typed variant — KB lookups are read-only.",
+						Optional:            true,
+					},
+					"headers": schema.MapAttribute{
+						MarkdownDescription: "Optional HTTP headers, e.g. `x-ms-query-source-authorization` for remote-SharePoint per-user ACL enforcement. Marked sensitive — values are redacted from plan / state output.",
+						Optional:            true,
+						Sensitive:           true,
+						ElementType:         types.StringType,
+					},
+				},
+			},
 		},
 	}
 }
